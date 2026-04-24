@@ -1,3 +1,41 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 804998c..ecb41a1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -324,9 +324,11 @@ if(STREFLOP_SOFT)
+ 	target_compile_definitions(streflop PUBLIC STREFLOP_SOFT)
+ elseif(STREFLOP_SSE)
+ 	target_compile_definitions(streflop PUBLIC STREFLOP_SSE)
+-	if(NOT MSVC)
++	if(NOT MSVC AND NOT EMSCRIPTEN)
+ 		target_compile_options(streflop PRIVATE -mfpmath=sse -msse -msse2)
+ 	endif()
++	# On emscripten, STREFLOP_SSE just pins Simple=float, Double=double via
++	# typedefs (see streflop.h). Skip the x86-only -mfpmath/-msse flags.
+ elseif(STREFLOP_NEON)
+ 	target_compile_definitions(streflop PUBLIC STREFLOP_NEON)
+ 	if(NOT MSVC)
+diff --git a/FPUSettings.h b/FPUSettings.h
+index 5883b36..d49817c 100644
+--- a/FPUSettings.h
++++ b/FPUSettings.h
+@@ -218,7 +218,15 @@ enum FPU_RoundMode {
+ */
+ 
+ // plan for portability
+-#if defined(_MSC_VER)
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM has no FPU control word. IEEE 754 is the WASM float semantics by spec —
++// rounding mode is round-to-nearest-even, no denorm flushing. These become
++// no-ops that zero their output; streflop's FE_* masks are purely informational.
++#define STREFLOP_FSTCW(cw)   do { (cw) = 0; } while (0)
++#define STREFLOP_FLDCW(cw)   do { (void)(cw); } while (0)
++#define STREFLOP_STMXCSR(cw) do { (cw) = 0; } while (0)
++#define STREFLOP_LDMXCSR(cw) do { (void)(cw); } while (0)
++#elif defined(_MSC_VER)
+ #ifdef _M_IX86
+ #define STREFLOP_FSTCW(cw) do { short tmp; __asm { fstcw tmp }; (cw) = tmp; } while (0)
+ #define STREFLOP_FLDCW(cw) do { short tmp = (cw); __asm { fclex }; __asm { fldcw tmp }; } while (0)
 diff --git a/SMath.h b/SMath.h
 index 36187b8..1e021c1 100644
 --- a/SMath.h
@@ -19,6 +57,34 @@ index 36187b8..1e021c1 100644
  // Names from the libm conversion
  namespace streflop_libm {
  using streflop::Simple;
+diff --git a/libm/streflop_libm_bridge.h b/libm/streflop_libm_bridge.h
+index 211faf0..638684e 100644
+--- a/libm/streflop_libm_bridge.h
++++ b/libm/streflop_libm_bridge.h
+@@ -110,6 +110,23 @@ inline long long MIN(long long x, long long y) {return x<y ? x : y;}
+ 
+ 
+ // Compensate lack of Math.h
++// On emscripten we force-include <cmath> globally, which defines these as
++// macros; undef them before our enum redefinition.
++#ifdef FP_NAN
++    #undef FP_NAN
++#endif
++#ifdef FP_INFINITE
++    #undef FP_INFINITE
++#endif
++#ifdef FP_ZERO
++    #undef FP_ZERO
++#endif
++#ifdef FP_SUBNORMAL
++    #undef FP_SUBNORMAL
++#endif
++#ifdef FP_NORMAL
++    #undef FP_NORMAL
++#endif
+ enum
+ {
+     FP_NAN = 0,
 diff --git a/streflop_cond.h b/streflop_cond.h
 index f199a2e..3f6cd9c 100644
 --- a/streflop_cond.h

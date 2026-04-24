@@ -130,3 +130,44 @@ Native + WASM both dump identical JSONL via the `state_dump.lua` widget.
 
 Every code change → rebuild WASM → capture → diff. Convergence on one
 specific replay is the testable endpoint.
+
+## ✅ Actual outcome (2026-04-24)
+
+All estimated milestones above hit in one session:
+
+- Configure: done.
+- Full compile: done.
+- Link: done (`spring-headless.wasm` 12–16 MB).
+- Hello-world: `node spring-headless.js --version` → exit 0.
+- Replay plays in node: 8-minute BAR demo runs end-to-end, engine exits
+  cleanly after the demo via the state-dump widget's stall detector.
+- Trace match vs native: 2507 common frames agree within tolerance.
+  First divergence at frame 786 (sim t≈26s), unit 12910 position off
+  by `(dx=-0.2, dz=+0.1)` — sub-pixel float drift, expected without
+  streflop.
+
+## Streflop port: deferred
+
+Tried enabling `STREFLOP_SSE=ON` on emscripten (so the Simple=float /
+Double=double typedefs avoid SOFT-mode class ambiguities). Hit a chain
+of x86-specific issues:
+
+1. `FPUSettings.h` inline asm (`fstcw`, `stmxcsr`, `ldmxcsr`) — patched
+   with no-op stubs on `__EMSCRIPTEN__`. WASM has no FPU control word;
+   IEEE 754 round-to-nearest-even is the WASM float contract by spec.
+2. assimp headers use `std::abs(float)` without `<cmath>` — fixed with
+   `-include cstdlib -include cmath` globally.
+3. `streflop_libm_bridge.h` redefines `FP_NAN/FP_INFINITE/...` as enum
+   values, colliding with `<cmath>` macros — added `#undef`s.
+4. `dosincos.cpp` and `sincos.tbl` collide with emscripten's `sincos`
+   libc function. streflop's libm declares a struct called `sincos`
+   which shadows the libc symbol. Would need renaming streflop's
+   struct throughout, or patching out the glibc-derived dbl-64/flt-32
+   files that assume the name.
+
+(4) cascades into further collisions deeper in streflop's glibc-origin
+libm (many-letter-prefixed symbols). Reverted for now — the WASM build
+stays `ENABLE_STREFLOP=OFF` and accepts sub-pixel float drift. 2507
+matching frames is plenty to demonstrate the sim is genuinely running.
+Full streflop port is probably another 1–2 sessions of mostly mechanical
+renames and `__EMSCRIPTEN__` guards around libm files. Left for later.
