@@ -175,31 +175,54 @@ index af36498..0086daa 100644
  }
  
 diff --git a/rts/Net/GameServer.cpp b/rts/Net/GameServer.cpp
-index a665059..2ec0253 100644
+index a665059..20c57a6 100644
 --- a/rts/Net/GameServer.cpp
 +++ b/rts/Net/GameServer.cpp
-@@ -2713,6 +2713,11 @@ std::string CGameServer::SpeedControlToString(int speedCtrl)
+@@ -2713,6 +2713,18 @@ std::string CGameServer::SpeedControlToString(int speedCtrl)
  __FORCE_ALIGN_STACK__
  void CGameServer::UpdateLoop()
  {
 +#if defined(__EMSCRIPTEN__) || defined(__wasm__)
-+	// WASM: single-threaded. Main loop drives the server via explicit calls;
-+	// don't block here.
++	// WASM: single-threaded. Called from the main loop once per frame —
++	// do ONE iteration of what the native thread's while() would do.
++	try {
++		if (quitServer) return;
++		if (udpListener != nullptr) udpListener->Update(loopSleepTime);
++		std::lock_guard<spring::recursive_mutex> scoped_lock(gameServerMutex);
++		ServerReadNet();
++		Update();
++	} CATCH_SPRING_ERRORS
 +	return;
 +#endif
  	try {
  		Threading::SetThreadName("netcode");
  		Threading::SetAffinity(~0);
+diff --git a/rts/Net/GameServer.h b/rts/Net/GameServer.h
+index b99d54d..edcadef 100644
+--- a/rts/Net/GameServer.h
++++ b/rts/Net/GameServer.h
+@@ -157,7 +157,9 @@ private:
+ 
+ 	void CheckForGameStart(bool forced = false);
+ 	void StartGame(bool forced);
+-	void UpdateLoop();
++public:
++	void UpdateLoop();  // exposed for WASM main-loop pump (no native daemon thread)
++private:
+ 	void Update();
+ 	void ProcessPacket(const unsigned playerNum, std::shared_ptr<const netcode::RawPacket> packet);
+ 	void CheckSync();
 diff --git a/rts/Net/Protocol/NetProtocol.cpp b/rts/Net/Protocol/NetProtocol.cpp
-index ca82c1f..774188c 100644
+index ca82c1f..e5a14b6 100644
 --- a/rts/Net/Protocol/NetProtocol.cpp
 +++ b/rts/Net/Protocol/NetProtocol.cpp
-@@ -154,6 +154,10 @@ void CNetProtocol::Send(std::shared_ptr<const netcode::RawPacket> pkt)
+@@ -154,6 +154,11 @@ void CNetProtocol::Send(std::shared_ptr<const netcode::RawPacket> pkt)
  __FORCE_ALIGN_STACK__
  void CNetProtocol::UpdateLoop()
  {
 +#if defined(__EMSCRIPTEN__) || defined(__wasm__)
-+	// WASM: single-threaded. Main loop already calls Update() — skip heartbeat.
++	// WASM: called from the main loop once per frame — do ONE Update pass.
++	Update();
 +	return;
 +#endif
  	Threading::SetThreadName("heartbeat");
@@ -612,6 +635,25 @@ index 0508223..6e02a72 100644
  		Threading::SetThreadName("watchdog");
  		Threading::SetWatchDogThread();
  
+diff --git a/rts/System/SpringApp.cpp b/rts/System/SpringApp.cpp
+index e5a011b..a68b763 100644
+--- a/rts/System/SpringApp.cpp
++++ b/rts/System/SpringApp.cpp
+@@ -875,6 +875,14 @@ bool SpringApp::Update()
+ 	globalRendering->UpdateWindow();
+ 	globalRendering->UpdateTimer();
+ 
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM: pump the server + client heartbeat each frame, since their
++	// native daemon threads are disabled.
++	extern CGameServer* gameServer;
++	if (gameServer != nullptr) gameServer->UpdateLoop();
++	if (clientNet   != nullptr) clientNet->UpdateLoop();
++#endif
++
+ 	#if 0
+ 	if (activeController == nullptr)
+ 		return true;
 diff --git a/rts/System/Threading/SpringThreading.h b/rts/System/Threading/SpringThreading.h
 index d03c5d1..996464e 100644
 --- a/rts/System/Threading/SpringThreading.h
@@ -749,6 +791,31 @@ index a405e02..a319bfc 100644
      #include "lib/sse2neon/sse2neon.h"
  #else
      #ifdef _MSC_VER
+diff --git a/rts/build/cmake/ConfigureVersion.cmake b/rts/build/cmake/ConfigureVersion.cmake
+index 8928dc5..dcf5e9a 100644
+--- a/rts/build/cmake/ConfigureVersion.cmake
++++ b/rts/build/cmake/ConfigureVersion.cmake
+@@ -28,6 +28,20 @@ include(UtilVersion)
+ fetch_spring_version(${SOURCE_ROOT} SPRING_ENGINE)
+ parse_spring_version(SPRING_VERSION_ENGINE "${SPRING_ENGINE_VERSION}")
+ 
++# If version parsing produced empty fields (e.g. sparse/shallow git clones where
++# `git describe` returns just a commit hash), substitute sensible numeric defaults
++# so BAR's Lua common/constants.lua (which does tonumber(Engine.versionMajor)
++# comparisons) doesn't nil-dereference.
++if("${SPRING_VERSION_ENGINE_MAJOR}" STREQUAL "")
++	set(SPRING_VERSION_ENGINE_MAJOR "2025")
++endif()
++if("${SPRING_VERSION_ENGINE_MINOR}" STREQUAL "")
++	set(SPRING_VERSION_ENGINE_MINOR "6")
++endif()
++if("${SPRING_VERSION_ENGINE_PATCH_SET}" STREQUAL "")
++	set(SPRING_VERSION_ENGINE_PATCH_SET "19")
++endif()
++
+ # We define these, so it may be used in the to-be-configured files
+ set(SPRING_VERSION_ENGINE "${SPRING_ENGINE_VERSION}")
+ if     ("${SPRING_VERSION_ENGINE}" MATCHES "^${VERSION_REGEX_RELEASE}$")
 diff --git a/rts/builds/CMakeLists.txt b/rts/builds/CMakeLists.txt
 index 61835bb..88d97be 100644
 --- a/rts/builds/CMakeLists.txt
