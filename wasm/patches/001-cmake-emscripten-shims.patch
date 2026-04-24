@@ -174,6 +174,37 @@ index af36498..0086daa 100644
 +#endif
  }
  
+diff --git a/rts/Net/GameServer.cpp b/rts/Net/GameServer.cpp
+index a665059..2ec0253 100644
+--- a/rts/Net/GameServer.cpp
++++ b/rts/Net/GameServer.cpp
+@@ -2713,6 +2713,11 @@ std::string CGameServer::SpeedControlToString(int speedCtrl)
+ __FORCE_ALIGN_STACK__
+ void CGameServer::UpdateLoop()
+ {
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM: single-threaded. Main loop drives the server via explicit calls;
++	// don't block here.
++	return;
++#endif
+ 	try {
+ 		Threading::SetThreadName("netcode");
+ 		Threading::SetAffinity(~0);
+diff --git a/rts/Net/Protocol/NetProtocol.cpp b/rts/Net/Protocol/NetProtocol.cpp
+index ca82c1f..774188c 100644
+--- a/rts/Net/Protocol/NetProtocol.cpp
++++ b/rts/Net/Protocol/NetProtocol.cpp
+@@ -154,6 +154,10 @@ void CNetProtocol::Send(std::shared_ptr<const netcode::RawPacket> pkt)
+ __FORCE_ALIGN_STACK__
+ void CNetProtocol::UpdateLoop()
+ {
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM: single-threaded. Main loop already calls Update() — skip heartbeat.
++	return;
++#endif
+ 	Threading::SetThreadName("heartbeat");
+ 
+ 	while (keepUpdating) {
 diff --git a/rts/Sim/Misc/GlobalSynced.cpp b/rts/Sim/Misc/GlobalSynced.cpp
 index 3c4f5d6..601dccf 100644
 --- a/rts/Sim/Misc/GlobalSynced.cpp
@@ -270,6 +301,29 @@ index dcd5730..ceaf215 100644
  #include "System/UnorderedMap.hpp"
  #include "System/ContainerUtil.h"
  #include "System/SafeUtil.h"
+diff --git a/rts/System/Net/UDPListener.cpp b/rts/System/Net/UDPListener.cpp
+index e8c3797..d6e44ca 100644
+--- a/rts/System/Net/UDPListener.cpp
++++ b/rts/System/Net/UDPListener.cpp
+@@ -44,10 +44,17 @@ UDPListener::~UDPListener() {
+ }
+ 
+ 
+-std::string UDPListener::TryBindSocket(int port, std::shared_ptr<asio::ip::udp::socket>& sock, const std::string& ip)
++std::string UDPListener::TryBindSocket(int port, std::shared_ptr<asio::ip::udp::socket>& sock, const std::string& ipIn)
+ {
+ 	std::string errorMsg;
+ 
++	// WASM: emscripten's resolver doesn't know "localhost" — map to loopback.
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	const std::string ip = (ipIn == "localhost") ? std::string("127.0.0.1") : ipIn;
++#else
++	const std::string& ip = ipIn;
++#endif
++
+ 	try {
+ 		asio::error_code err;
+ 
 diff --git a/rts/System/Platform/CpuID.cpp b/rts/System/Platform/CpuID.cpp
 index 79fab4b..f5008ef 100644
 --- a/rts/System/Platform/CpuID.cpp
