@@ -83,13 +83,14 @@ def _ensure_content(detail: dict):
         if r.returncode != 0:
             print(f"    (pr-downloader exit {r.returncode}: {r.stderr.strip()[-200:]})", flush=True)
 
-def _capture(sdfz: Path) -> Path:
+def _capture(sdfz: Path, on_running=None) -> Path:
     out_name = sdfz.stem
     trace = TRACES / f"{out_name}.jsonl"
     if trace.exists() and trace.stat().st_size > 0:
         return trace
     with _capture_lock:
         if trace.exists() and trace.stat().st_size > 0: return trace
+        if on_running: on_running()
         print(f"  capturing {sdfz.name}...", flush=True)
         r = subprocess.run(["bash", str(CAPTURE), str(sdfz), out_name],
                            env={**os.environ, "FAST": "1"})
@@ -115,8 +116,8 @@ def _run_job(job_id: str, replay_id: str):
         _ensure_content(detail)
         _set_stage(job_id, "downloading_sdfz")
         sdfz = _download_sdfz(detail)
-        _set_stage(job_id, "running_replay")
-        _capture(sdfz)
+        _set_stage(job_id, "queued_behind")  # waits here if another capture is in flight
+        _capture(sdfz, on_running=lambda: _set_stage(job_id, "running_replay"))
         _set_stage(job_id, "done")
     except Exception as e:
         import traceback; traceback.print_exc()

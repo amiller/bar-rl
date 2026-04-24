@@ -59,10 +59,31 @@ function widget:Shutdown()
     if fh then fh:close() end
 end
 
+-- Headless spring keeps simulating after the demo file runs out, so the
+-- process never exits on its own. Quit on GameOver (normal end) and also
+-- detect the "nothing happening anymore" case: if the unit count is stable
+-- and no frames have been added for a while, we're past the demo.
+local lastUnitCount, stableFrames = -1, 0
+local STABLE_EXIT_FRAMES = 30 * 60 * 2   -- 2 sim-minutes of no change → quit
+
+function widget:GameOver(winners)
+    Spring.Echo("[state_dump] GameOver; quitting"); Spring.Quit()
+end
+
 function widget:GameFrame(f)
     if f % SAMPLE_EVERY ~= 0 then return end
-    local parts = {}
     local units = spGetAllUnits()
+    -- Detect stall past demo end: unit-count frozen for STABLE_EXIT_FRAMES frames.
+    if #units == lastUnitCount then
+        stableFrames = stableFrames + SAMPLE_EVERY
+        if stableFrames > STABLE_EXIT_FRAMES and f > 30 * 30 then  -- min 30s of match
+            Spring.Echo(sfmt("[state_dump] stalled at frame %d; quitting", f))
+            Spring.Quit()
+        end
+    else
+        stableFrames = 0; lastUnitCount = #units
+    end
+    local parts = {}
     for i = 1, #units do
         local uid = units[i]
         local x, _, z = spGetUnitPosition(uid)
