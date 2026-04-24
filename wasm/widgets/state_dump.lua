@@ -1,0 +1,87 @@
+-- Minimal state dump widget for Recoil/BAR headless replay playback.
+-- Writes one JSONL record per frame (downsampled) to ./state_trace.jsonl
+-- relative to the engine's write-dir (so the sandbox captures it).
+
+function widget:GetInfo()
+    return {
+        name    = "State Dump",
+        desc    = "Dump per-frame unit state to JSONL for offline viewers/diffing",
+        author  = "claude",
+        date    = "2026-04-24",
+        layer   = 0,
+        enabled = true,
+    }
+end
+
+local SAMPLE_EVERY = 6   -- 30fps sim / 6 = 5 snapshots/sec
+local OUT_PATH     = "state_trace.jsonl"
+
+local fh
+local spGetAllUnits     = Spring.GetAllUnits
+local spGetUnitPosition = Spring.GetUnitPosition
+local spGetUnitTeam     = Spring.GetUnitTeam
+local spGetUnitHealth   = Spring.GetUnitHealth
+local spGetUnitDefID    = Spring.GetUnitDefID
+local sfmt              = string.format
+local tconcat           = table.concat
+
+local function w(line)
+    if not fh then return end
+    fh:write(line); fh:write("\n")
+end
+
+local function meta_record()
+    local defs = {}
+    for id, d in pairs(UnitDefs) do
+        defs[tostring(id)] = sfmt('{"n":"%s","r":%d}', d.name or "?", math.floor((d.radius or 16) + 0.5))
+    end
+    local parts = {}
+    for k, v in pairs(defs) do parts[#parts+1] = sfmt('"%s":%s', k, v) end
+    -- mapName is the scriptName (e.g. "Great Divide V1"), keyed by the public
+    -- maps-metadata CDN: viewers can fetch the minimap thumbnail from it directly.
+    return sfmt('{"t":"meta","mapName":"%s","mapX":%d,"mapZ":%d,"defs":{%s}}',
+        (Game.mapName or ""):gsub('"', "'"),
+        Game.mapSizeX or 0, Game.mapSizeZ or 0, tconcat(parts, ","))
+end
+
+function widget:Initialize()
+    fh = io.open(OUT_PATH, "w")
+    if not fh then
+        Spring.Echo("[state_dump] could not open " .. OUT_PATH)
+        widgetHandler:RemoveWidget(self); return
+    end
+    fh:setvbuf("line")   -- critical: flush on every newline so the file is always consistent
+    w(meta_record())
+    Spring.Echo("[state_dump] writing to " .. OUT_PATH)
+end
+
+function widget:Shutdown()
+    if fh then fh:close() end
+end
+
+function widget:GameFrame(f)
+    if f % SAMPLE_EVERY ~= 0 then return end
+    local parts = {}
+    local units = spGetAllUnits()
+    for i = 1, #units do
+        local uid = units[i]
+        local x, _, z = spGetUnitPosition(uid)
+        if x then
+            local hp, maxHp = spGetUnitHealth(uid)
+            local pct = (hp and maxHp and maxHp > 0) and math.floor(hp / maxHp * 100) or 0
+            parts[#parts+1] = sfmt("[%d,%d,%d,%.1f,%.1f,%d]",
+                uid, spGetUnitTeam(uid) or -1, spGetUnitDefID(uid) or 0, x, z, pct)
+        end
+    end
+    w(sfmt('{"t":"f","f":%d,"u":[%s]}', f, tconcat(parts, ",")))
+end
+
+function widget:UnitCreated(uid, defId, team)
+    if not fh then return end
+    w(sfmt('{"t":"c","uid":%d,"def":%d,"team":%d}', uid, defId, team))
+end
+
+function widget:UnitDestroyed(uid, defId, team)
+    if not fh then return end
+    w(sfmt('{"t":"d","uid":%d}', uid))
+end

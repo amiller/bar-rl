@@ -1,0 +1,25 @@
+# Third-party sources (cloned separately — don't re-vendor in this repo)
+repos/
+
+# Build artifacts
+wasm/build-wasm/
+wasm/tools/
+wasm/traces/*.jsonl
+wasm/traces/*.infolog.gz
+
+# Captured traces (per-run, not worth versioning)
+replays/traces/*.jsonl
+replays/traces/*.infolog.gz
+
+# Icons symlink (points into real BAR install)
+wasm/viewer/icons
+demos_cache/
+
+# Node
+node_modules/
+package-lock.json
+
+# OS/editor
+.DS_Store
+*.swp
+*~

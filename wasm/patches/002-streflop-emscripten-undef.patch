@@ -1,0 +1,34 @@
+diff --git a/SMath.h b/SMath.h
+index 36187b8..1e021c1 100644
+--- a/SMath.h
++++ b/SMath.h
+@@ -19,6 +19,16 @@
+ // just in case, should already be included
+ #include "streflop.h"
+ 
++// Emscripten's compat/math.h defines isnanf/isinff/isfinitef as macros,
++// which collide with streflop's inline function declarations below. Undef them.
++#ifdef __EMSCRIPTEN__
++    #undef isnanf
++    #undef isinff
++    #undef isfinitef
++    #undef isnormalf
++    #undef fpclassifyf
++#endif
++
+ // Names from the libm conversion
+ namespace streflop_libm {
+ using streflop::Simple;
+diff --git a/streflop_cond.h b/streflop_cond.h
+index f199a2e..3f6cd9c 100644
+--- a/streflop_cond.h
++++ b/streflop_cond.h
+@@ -135,6 +135,8 @@ namespace math {
+ 	static inline float floorf(float x) { return std::floor(x); }
+ 	static inline float ceilf(float x) { return std::ceil(x); }
+ 	static inline float cbrtf(float x) { return std::cbrt(x); }
++	static inline float truncf(float x) { return std::trunc(x); }
++	using std::trunc;
+ 
+ 
+ // the following are C99 functions -> not supported by VS C

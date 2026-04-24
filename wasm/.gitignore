@@ -1,0 +1,4 @@
+build-wasm/
+tools/
+traces/*.jsonl
+traces/*.infolog.gz

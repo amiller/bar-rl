@@ -1,0 +1,848 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 72f20dc..c530dce 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -110,7 +110,8 @@ set(MARCH_FLAG ${MARCH} CACHE STRING "CPU optimization (use `generic` for generi
+ if    (CMAKE_SIZEOF_VOID_P EQUAL 8)
+ 	set(MARCH_BITS 64 CACHE INTERNAL "" FORCE)
+ else  (CMAKE_SIZEOF_VOID_P EQUAL 8)
+-	message(FATAL_ERROR "RecoilEngine does not support 32 bits." )
++	message(STATUS "WASM32: bypassing 32-bit check, treating as 64")
++	set(MARCH_BITS 64 CACHE INTERNAL "" FORCE)
+ endif (CMAKE_SIZEOF_VOID_P EQUAL 8)
+ 
+ # Detect architecture
+@@ -121,7 +122,8 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+ 	set(IS_ARM64_BUILD FALSE)
+ 	message(STATUS "Detected x86-64 architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+ else()
+-	message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}. Only ARM64 and x86-64 are supported.")
++	message(STATUS "WASM architecture passthrough: ${CMAKE_SYSTEM_PROCESSOR}")
++	set(IS_ARM64_BUILD FALSE)
+ endif()
+ 
+ message(STATUS "Building Spring on ${MARCH_BITS}bit environment")
+@@ -316,7 +318,32 @@ endif (RECOIL_DETAILED_TRACY_ZONING)
+ #  So req. checks are done in the build target's CMakeLists.txt.
+ find_package(SDL2 MODULE)
+ 
+-find_package_static(DevIL 1.8.0 REQUIRED)
++if (EMSCRIPTEN)
++	# Our stub cmake dir first so our FindZLIB.cmake (etc.) wins
++	list(INSERT CMAKE_MODULE_PATH 0 "$ENV{BAR_WASM_STUBS}/cmake")
++
++	# DevIL -> local stub
++	set(DEVIL_STUB_DIR "$ENV{BAR_WASM_STUBS}/devil")
++	set(IL_INCLUDE_DIR  "${DEVIL_STUB_DIR}/include" CACHE PATH "" FORCE)
++	set(IL_LIBRARIES    "IL" CACHE STRING "" FORCE)
++	set(ILU_LIBRARIES   "IL" CACHE STRING "" FORCE)
++	add_subdirectory("${DEVIL_STUB_DIR}" "${CMAKE_BINARY_DIR}/devil_stub")
++
++	# ZLIB -> emscripten port via -sUSE_ZLIB=1 (fake find_package success)
++	set(ZLIB_FOUND TRUE CACHE BOOL "" FORCE)
++	set(ZLIB_LIBRARY "" CACHE STRING "" FORCE)
++	set(ZLIB_LIBRARIES "" CACHE STRING "" FORCE)
++	set(ZLIB_INCLUDE_DIR "" CACHE STRING "" FORCE)
++	set(ZLIB_INCLUDE_DIRS "" CACHE STRING "" FORCE)
++	set(ZLIB_VERSION_STRING "1.3.1" CACHE STRING "" FORCE)
++	if (NOT TARGET ZLIB::ZLIB)
++		add_library(ZLIB::ZLIB INTERFACE IMPORTED GLOBAL)
++		target_compile_options(ZLIB::ZLIB INTERFACE "SHELL:-sUSE_ZLIB=1")
++		target_link_options(ZLIB::ZLIB INTERFACE "SHELL:-sUSE_ZLIB=1")
++	endif()
++else()
++	find_package_static(DevIL 1.8.0 REQUIRED)
++endif()
+ 
+ if    (WIN32)
+ 	find_package(Windres REQUIRED)
+@@ -462,7 +489,13 @@ endif()
+ 
+ ### compiler specific flags
+ set(CXX_FLAGS_DEBUG_ADDITIONAL "")
+-if (CMAKE_COMPILER_IS_GNUCXX)
++if (EMSCRIPTEN)
++	# WASM: no -msse/-mfpmath=sse. No sse2neon either (it targets ARM NEON,
++	# not WASM SIMD). Any SSE intrinsics in engine code will need scalar
++	# fallbacks or WASM SIMD equivalents — surfaces as the next compile pass.
++	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msimd128")
++	set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -msimd128")
++elseif (CMAKE_COMPILER_IS_GNUCXX)
+ 	if    (UNIX)
+ 		check_and_add_flags(CMAKE_CXX_FLAGS "-fdiagnostics-color=auto")
+ 	endif (UNIX)
+@@ -700,8 +733,14 @@ endif (NOT "${AI_TYPES}" STREQUAL "NONE")
+ # As tools/unitsync/ depends on sources from here, we add this one first
+ add_subdirectory(rts/System)
+ 
+-# additional tools
+-add_subdirectory(tools)
++# additional tools (skip for emscripten — we only need the engine binary)
++if (NOT EMSCRIPTEN)
++	add_subdirectory(tools)
++else()
++	# Use stub pr-downloader (no CURL dep) so engine link still resolves
++	# prd::jsoncpp, prd::base64, pr-downloader targets
++	add_subdirectory("$ENV{BAR_WASM_STUBS}/pr-downloader" "${CMAKE_BINARY_DIR}/prd_stub")
++endif()
+ 
+ # user-docs
+ add_subdirectory(doc)
+@@ -719,7 +758,9 @@ add_subdirectory(rts)
+ # Unit tests
+ # this has to be in root CMakeLists.txt
+ enable_testing()
+-add_subdirectory(test)
++if (NOT EMSCRIPTEN)
++	add_subdirectory(test)
++endif()
+ 
+ if (INSTALL_PORTABLE)
+ 	install(DIRECTORY DESTINATION games)
+diff --git a/rts/CMakeLists.txt b/rts/CMakeLists.txt
+index 001ea7c..0ccb177 100644
+--- a/rts/CMakeLists.txt
++++ b/rts/CMakeLists.txt
+@@ -35,7 +35,9 @@ if(DEBUG_GLSTATE)
+ endif()
+ 
+ ### give error when not found
+-find_package_static(DevIL REQUIRED)
++if (NOT EMSCRIPTEN)
++	find_package_static(DevIL REQUIRED)
++endif()
+ 
+ ### Assemble common include dirs
+ include_directories(BEFORE lib)
+@@ -106,7 +108,7 @@ if    (USE_MIMALLOC)
+ endif (USE_MIMALLOC)
+ 
+ 
+-if(UNIX AND NOT (CMAKE_SYSTEM_NAME MATCHES "OpenBSD"))
++if(UNIX AND NOT (CMAKE_SYSTEM_NAME MATCHES "OpenBSD") AND NOT EMSCRIPTEN)
+ 	find_package_static(Libunwind 1.4.0 REQUIRED)
+ 	prefer_static_libs()
+ 	find_library(LZMA_LIBRARY lzma)
+diff --git a/rts/Game/PreGame.cpp b/rts/Game/PreGame.cpp
+index af36498..0086daa 100644
+--- a/rts/Game/PreGame.cpp
++++ b/rts/Game/PreGame.cpp
+@@ -171,7 +171,12 @@ int CPreGame::KeyPressed(int keyCode, int scanCode, bool isRepeat)
+ 
+ void CPreGame::AsyncExecute(CPreGame::AsyncExecFuncType execFunc, const std::string& argument)
+ {
+-	pendingTask = std::async(std::launch::async,
++	pendingTask = std::async(
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	std::launch::deferred, // WASM: no pthread; run when .wait()/.get()
++#else
++	std::launch::async,
++#endif
+ 		[execFunc, argument/*copy the argument explicitly*/, this]() {
+ 			const auto InitStuffAndExecute = [execFunc, argument/*copy the argument explicitly*/, this]() {
+ 				Threading::SetThreadName("pregame");
+@@ -441,7 +446,12 @@ void CPreGame::UpdateClientNet()
+ 				// server first sends this to let us know about teams, allyteams
+ 				// etc. (not if we are joining mid-game as an extra player), see
+ 				// NETMSG_SETPLAYERNUM
+-				pendingTask = std::async(std::launch::async,
++				pendingTask = std::async(
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	std::launch::deferred, // WASM: no pthread; run when .wait()/.get()
++#else
++	std::launch::async,
++#endif
+ 					&CPreGame::GameDataReceived, this,
+ 					packet
+ 				);
+@@ -682,11 +692,18 @@ bool CPreGame::HasPendingAsyncTask()
+ 		return false;
+ 
+ 	using namespace std::chrono_literals;
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM: tasks are std::launch::deferred (no pthread). Force-run them now.
++	pendingTask.get();
++	pendingTask = {};
++	return false;
++#else
+ 	if (pendingTask.wait_for(0ms) != std::future_status::ready)
+ 		return true;
+ 
+ 	pendingTask.get();
+ 	pendingTask = {};
+ 	return false;
++#endif
+ }
+ 
+diff --git a/rts/Sim/Misc/GlobalSynced.cpp b/rts/Sim/Misc/GlobalSynced.cpp
+index 3c4f5d6..601dccf 100644
+--- a/rts/Sim/Misc/GlobalSynced.cpp
++++ b/rts/Sim/Misc/GlobalSynced.cpp
+@@ -5,6 +5,7 @@
+ #include <algorithm>
+ #include <assert.h>
+ #include <common/TracyColor.hpp>
++#include <tracy/Tracy.hpp>
+ #include <cstring>
+ 
+ #include "ExternalAI/SkirmishAIHandler.h"
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index b807a81..43e9331 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -964,11 +964,16 @@ static auto SplitResourcePackIntoPositiveNegative (const SResourcePack &pack)
+ {
+ 	SResourcePack positive {0.0f}, negative {0.0f};
+ 
+-	for (auto [resourceID, value] : std::views::enumerate (pack)) {
+-		if (value < 0.0f)
+-			negative[resourceID] = -value;
+-		else
+-			positive[resourceID] = value;
++	// Emscripten libc++ lacks std::views::enumerate (C++23); hand-rolled loop
++	{
++		std::size_t resourceID = 0;
++		for (const auto& value : pack) {
++			if (value < 0.0f)
++				negative[resourceID] = -value;
++			else
++				positive[resourceID] = value;
++			++resourceID;
++		}
+ 	}
+ 
+ 	return std::make_pair (positive, negative);
+diff --git a/rts/System/FileSystem/DataDirLocater.cpp b/rts/System/FileSystem/DataDirLocater.cpp
+index 760fa1e..35d1862 100644
+--- a/rts/System/FileSystem/DataDirLocater.cpp
++++ b/rts/System/FileSystem/DataDirLocater.cpp
+@@ -17,6 +17,21 @@
+ 	#ifndef SHGFP_TYPE_CURRENT
+ 		#define SHGFP_TYPE_CURRENT 0
+ 	#endif
++#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM: no wordexp(). Stub it to a pass-through (no env expansion).
++	typedef struct { size_t we_wordc; char** we_wordv; } wordexp_t;
++	#define WRDE_NOCMD 0
++	#include <cstdlib>
++	#include <cstring>
++	static inline int wordexp(const char* s, wordexp_t* w, int) {
++		w->we_wordc = 1;
++		w->we_wordv = (char**)std::malloc(sizeof(char*));
++		w->we_wordv[0] = strdup(s);
++		return 0; // EXIT_SUCCESS
++	}
++	static inline void wordfree(wordexp_t* w) {
++		if (w->we_wordv) { std::free(w->we_wordv[0]); std::free(w->we_wordv); }
++	}
+ #else
+ 	#include <wordexp.h>
+ #endif
+diff --git a/rts/System/MainDefines.h b/rts/System/MainDefines.h
+index 9794737..f5eac92 100644
+--- a/rts/System/MainDefines.h
++++ b/rts/System/MainDefines.h
+@@ -27,6 +27,9 @@
+ #define __is_x86_arch__ 0
+ #elif (defined(__i386__) || defined(__x86_64__) || defined(__amd64__) || defined(_M_AMD64) || defined(_M_IX86) || defined(_M_X64))
+ #define __is_x86_arch__ 1
++#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM: no native x86 intrinsics; sse2neon provides SSE-via-NEON translation.
++#define __is_x86_arch__ 0
+ #else
+ #error unknown CPU-architecture
+ #endif
+diff --git a/rts/System/MemPoolTypes.h b/rts/System/MemPoolTypes.h
+index dcd5730..ceaf215 100644
+--- a/rts/System/MemPoolTypes.h
++++ b/rts/System/MemPoolTypes.h
+@@ -15,6 +15,13 @@
+ 
+ #include "smmalloc/smmalloc.h"
+ 
++// Emscripten's musl <sys/user.h>/<limits.h> defines PAGE_SIZE as a macro,
++// which collides with this header's `PAGE_SIZE()` member function. Undef
++// defensively — only affects this translation unit.
++#ifdef PAGE_SIZE
++    #undef PAGE_SIZE
++#endif
++
+ #include "System/UnorderedMap.hpp"
+ #include "System/ContainerUtil.h"
+ #include "System/SafeUtil.h"
+diff --git a/rts/System/Platform/CpuID.cpp b/rts/System/Platform/CpuID.cpp
+index 79fab4b..f5008ef 100644
+--- a/rts/System/Platform/CpuID.cpp
++++ b/rts/System/Platform/CpuID.cpp
+@@ -1,6 +1,22 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "CpuID.h"
++
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM: no cpuid instruction. Report a single logical core.
++namespace springproc {
++    void ExecCPUID(unsigned int* a, unsigned int* b, unsigned int* c, unsigned int* d) {
++        if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; if (d) *d = 0;
++    }
++    CPUID::CPUID()
++        : numLogicalCores(1), numPhysicalCores(1)
++        , numPerformanceCores(1), smtDetected(false) {}
++    std::string CPUID::GetCPUBrandString() { return "WebAssembly"; }
++    void CPUID::EnumerateCores() {}
++    CPUID& CPUID::GetInstance() { static CPUID inst; return inst; }
++}
++#else
++
+ #include "System/MainDefines.h"
+ #include "System/Platform/Threading.h"
+ #include "System/Log/ILog.h"
+@@ -145,3 +161,6 @@ namespace springproc {
+     }
+ 
+ }
++
++#endif // !__EMSCRIPTEN__
++
+diff --git a/rts/System/Platform/Linux/CpuTopology.cpp b/rts/System/Platform/Linux/CpuTopology.cpp
+index d6f4405..db03c95 100644
+--- a/rts/System/Platform/Linux/CpuTopology.cpp
++++ b/rts/System/Platform/Linux/CpuTopology.cpp
+@@ -10,6 +10,8 @@
+ #include <cpuid.h>
+ #elif defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64)
+ // ARM doesn't need cpuid.h
++#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM: single-threaded-ish, no cpuid
+ #else
+ 	#error "Unsupported architecture"
+ #endif
+@@ -528,6 +530,21 @@ ProcessorCaches GetProcessorCache() {
+ 	return processorCaches;
+ }
+ 
++#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++
++// WASM: single logical core. Return a trivially-sized topology.
++ProcessorCaches GetProcessorCaches() {
++    ProcessorCaches pc;
++    return pc;
++}
++ProcessorMasks GetProcessorMasks() {
++    ProcessorMasks pm;
++    return pm;
++}
++int GetLogicalCpuCores() { return 1; }
++int GetPhysicalCpuCores() { return 1; }
++int GetPerformanceCpuCores() { return 1; }
++
+ #else
+ 	#error "Unsupported architecture"
+ #endif
+diff --git a/rts/System/Platform/Linux/CrashHandler.cpp b/rts/System/Platform/Linux/CrashHandler.cpp
+index 062e399..22e8d29 100644
+--- a/rts/System/Platform/Linux/CrashHandler.cpp
++++ b/rts/System/Platform/Linux/CrashHandler.cpp
+@@ -2,6 +2,20 @@
+ 
+ #include "System/Platform/CrashHandler.h"
+ 
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM: no execinfo, libunwind, or signal-based stack tracing. Stub the
++// entire API — replay playback won't crash-handle anyway.
++namespace CrashHandler {
++    void Install() {}
++    void Remove() {}
++    void Stacktrace(Threading::NativeThreadHandle, const std::string&, const int) {}
++    void PrepareStacktrace(const int) {}
++    void CleanupStacktrace(const int) {}
++    void SuspendedStacktrace(Threading::ThreadControls*, const char*) {}
++    void OutputStacktrace() {}
++}
++#else
++
+ #include <cinttypes> // uintptr_t
+ #include <cstring> // strnlen
+ #include <cstdlib>
+@@ -1077,3 +1091,6 @@ namespace CrashHandler
+ 		std::set_new_handler(nullptr);
+ 	}
+ }
++
++#endif // !__EMSCRIPTEN__
++
+diff --git a/rts/System/Platform/Linux/Futex.cpp b/rts/System/Platform/Linux/Futex.cpp
+index 253b709..5988f9e 100644
+--- a/rts/System/Platform/Linux/Futex.cpp
++++ b/rts/System/Platform/Linux/Futex.cpp
+@@ -1,6 +1,23 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "Futex.h"
++
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM: no futex. Use spin-locks over std::atomic — fine for single-threaded
++// replay playback (THREADPOOL is effectively disabled).
++spring_futex::spring_futex()  noexcept { mtx = 0; }
++spring_futex::~spring_futex() { mtx = 0; }
++void spring_futex::lock()     { while (__atomic_exchange_n(&mtx, 1, __ATOMIC_ACQUIRE)) {} }
++bool spring_futex::try_lock() noexcept { return !__atomic_exchange_n(&mtx, 1, __ATOMIC_ACQUIRE); }
++void spring_futex::unlock()   { __atomic_store_n(&mtx, 0, __ATOMIC_RELEASE); }
++
++linux_signal::linux_signal()  noexcept : sleepers(0), gen(0), mtx(0) {}
++linux_signal::~linux_signal() {}
++void linux_signal::wait() {}
++void linux_signal::wait_for(spring_time) {}
++void linux_signal::notify_all(const int) {}
++#else
++
+ #include <cstdlib>
+ #include <sys/syscall.h>
+ #include <unistd.h>
+@@ -171,3 +188,6 @@ void linux_signal::notify_all(const int min_sleepers)
+ 	do_futex(&mtx, FUTEX_WAKE, INT_MAX, NULL);
+ }
+ 
++#endif // !__EMSCRIPTEN__
++
++
+diff --git a/rts/System/Platform/Linux/ThreadSupport.cpp b/rts/System/Platform/Linux/ThreadSupport.cpp
+index 6036419..e60587f 100644
+--- a/rts/System/Platform/Linux/ThreadSupport.cpp
++++ b/rts/System/Platform/Linux/ThreadSupport.cpp
+@@ -1,5 +1,22 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM: no process-level thread introspection. Stubs for Threading:: API.
++#include <cassert>
++#include <functional>
++#include <memory>
++#include "System/Platform/Threading.h"
++
++namespace Threading {
++void SetupCurrentThreadControls(std::shared_ptr<ThreadControls>&) {}
++void ThreadStart(std::function<void()> taskFunc, std::shared_ptr<ThreadControls>*, ThreadControls*) {
++    if (taskFunc) taskFunc();
++}
++SuspendResult ThreadControls::Suspend() { return Threading::THREADERR_NONE; }
++SuspendResult ThreadControls::Resume()  { return Threading::THREADERR_NONE; }
++}
++#else
++
+ #include <cassert>
+ #include <functional>
+ #include <pthread.h>
+@@ -247,3 +264,5 @@ SuspendResult ThreadControls::Resume()
+ }
+ 
+ }
++
++#endif // !__EMSCRIPTEN__
+diff --git a/rts/System/Platform/Misc.cpp b/rts/System/Platform/Misc.cpp
+index 9139529..00b4ecf 100644
+--- a/rts/System/Platform/Misc.cpp
++++ b/rts/System/Platform/Misc.cpp
+@@ -223,6 +223,12 @@ namespace Platform
+ 			procExeFilePath = buf;
+ 
+ 
++		#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++		// WASM: no concept of process exe path. Synthetic placeholder; sim
++		// never meaningfully uses this.
++		procExeFilePath = "/spring-headless";
++
++
+ 		#else
+ 		#error implement this
+ 		#endif
+@@ -738,10 +744,10 @@ namespace Platform
+ 		return (GetMacType(macAddr, 0), macAddr);
+ 	}
+ 
+-	#elif defined(__APPLE__)
++	#elif defined(__APPLE__) || defined(__EMSCRIPTEN__) || defined(__wasm__)
+ 
+ 	std::array<uint8_t, 6> GetRawMacAddr() {
+-		// TODO: http://lists.freebsd.org/pipermail/freebsd-hackers/2004-June/007415.html
++		// Apple/WASM: no portable MAC lookup. Return zero.
+ 		return {{0, 0, 0, 0, 0, 0}};
+ 	}
+ 
+diff --git a/rts/System/Platform/ThreadAffinityGuard.cpp b/rts/System/Platform/ThreadAffinityGuard.cpp
+index 713b7b5..db2c2cd 100644
+--- a/rts/System/Platform/ThreadAffinityGuard.cpp
++++ b/rts/System/Platform/ThreadAffinityGuard.cpp
+@@ -1,6 +1,12 @@
+ #include "ThreadAffinityGuard.h"
+ 
+ #include "System/Log/ILog.h"
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM has no thread-affinity concept. Everything here becomes a no-op.
++ThreadAffinityGuard::ThreadAffinityGuard() : affinitySaved(false) {}
++ThreadAffinityGuard::~ThreadAffinityGuard() {}
++#else
++
+ #ifdef _WIN32
+ #include <windows.h>
+ #else
+@@ -43,3 +49,6 @@ ThreadAffinityGuard::~ThreadAffinityGuard() {
+ #endif
+ 	}
+ }
++
++#endif // !__EMSCRIPTEN__
++
+diff --git a/rts/System/Platform/Threading.cpp b/rts/System/Platform/Threading.cpp
+index 0df646e..fe130ab 100644
+--- a/rts/System/Platform/Threading.cpp
++++ b/rts/System/Platform/Threading.cpp
+@@ -2,6 +2,26 @@
+ 
+ #include "Threading.h"
+ 
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++// WASM: emscripten's <sched.h> declares sched_getaffinity/setaffinity but
++// does not provide runtime implementations (they're Linux syscalls).
++// Provide no-op bodies here so the link succeeds — affinity is meaningless
++// on WASM anyway (single-threaded replay playback).
++#include <sched.h>
++extern "C" int sched_getaffinity(pid_t, size_t, cpu_set_t* s) {
++    if (s) CPU_ZERO(s);
++    return 0;
++}
++extern "C" int sched_setaffinity(pid_t, size_t, const cpu_set_t*) {
++    return 0;
++}
++#include <pthread.h>
++#include <sched.h>
++extern "C" int pthread_setschedparam(pthread_t, int, const struct sched_param*) {
++    return 0;  // thread priority is meaningless on WASM
++}
++#endif
++
+ #include "System/Log/ILog.h"
+ #include "System/Platform/CpuID.h"
+ 
+@@ -230,6 +250,8 @@ namespace Threading {
+ 		// Apple Silicon CCDs are grouped into a minimum of 4 cores with atrocious cross-CCD latency, so avoid
+ 		// multiple CCDs there as well.
+ 		constexpr uint32_t threadCountThreshold = 4;
++#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++		constexpr uint32_t threadCountThreshold = 1;
+ #else
+ 		#error "Unsupported architecture"
+ #endif
+@@ -511,6 +533,9 @@ namespace Threading {
+ 	#ifndef _WIN32
+ 	#ifdef __APPLE__
+ 		pthread_setname_np(newname.c_str());
++	#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++		// no prctl on WASM; thread naming is cosmetic, skip
++		(void)newname;
+ 	#else
+ 		prctl(PR_SET_NAME, newname.c_str(), 0, 0, 0);
+ 	#endif
+diff --git a/rts/System/Platform/Watchdog.cpp b/rts/System/Platform/Watchdog.cpp
+index 0508223..6e02a72 100644
+--- a/rts/System/Platform/Watchdog.cpp
++++ b/rts/System/Platform/Watchdog.cpp
+@@ -115,6 +115,10 @@ namespace Watchdog
+ 	__FORCE_ALIGN_STACK__
+ 	static void HangDetectorLoop()
+ 	{
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++		// WASM: single-threaded. Don't run the hang detector loop.
++		return;
++#endif
+ 		Threading::SetThreadName("watchdog");
+ 		Threading::SetWatchDogThread();
+ 
+diff --git a/rts/System/Threading/SpringThreading.h b/rts/System/Threading/SpringThreading.h
+index d03c5d1..996464e 100644
+--- a/rts/System/Threading/SpringThreading.h
++++ b/rts/System/Threading/SpringThreading.h
+@@ -9,6 +9,7 @@
+ #include <atomic>
+ #include <thread>
+ #include <condition_variable>
++#include <functional>  // std::invoke for spring::thread inline-exec shim
+ 
+ #include "System/simd_compat.h"
+ 
+@@ -48,7 +49,38 @@ namespace spring {
+ 	typedef std::condition_variable_any condition_variable;
+ #endif
+ 
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM build: pthreads disabled at link. Replace spring::thread with an
++	// inline executor — run the work synchronously in the constructor, pretend
++	// the "thread" has already finished. Any engine code that waits for join()
++	// proceeds immediately; detach() is a no-op.
++	class thread {
++	public:
++		using id = std::thread::id;
++		using native_handle_type = void*;
++		thread() noexcept = default;
++		// Run the callable inline in the constructor. This works for one-shot
++		// init threads (e.g. FileSystemInitializer::InitializeThr). For daemon
++		// loops (Watchdog::HangDetectorLoop, ThreadPool::WorkerLoop) those
++		// specific functions are separately patched to early-return under
++		// __EMSCRIPTEN__ so they don't hang here.
++		template<class F, class... A> explicit thread(F&& f, A&&... a) {
++			try { std::invoke(std::forward<F>(f), std::forward<A>(a)...); } catch (...) {}
++		}
++		thread(const thread&) = delete;
++		thread(thread&&) noexcept = default;
++		thread& operator=(thread&&) noexcept = default;
++		bool joinable() const noexcept { return false; }
++		void join() {}
++		void detach() {}
++		id get_id() const noexcept { return {}; }
++		native_handle_type native_handle() { return nullptr; }
++		static unsigned hardware_concurrency() noexcept { return 1; }
++		void swap(thread&) noexcept {}
++	};
++#else
+ 	typedef std::thread thread;
++#endif
+ 	namespace this_thread { using namespace std::this_thread; };
+ 	typedef std::cv_status cv_status;
+ 	typedef std::condition_variable_any condition_variable_any;
+diff --git a/rts/System/Threading/ThreadPool.cpp b/rts/System/Threading/ThreadPool.cpp
+index a9b5dcd..2125533 100644
+--- a/rts/System/Threading/ThreadPool.cpp
++++ b/rts/System/Threading/ThreadPool.cpp
+@@ -238,6 +238,12 @@ static bool DoTask(int tid, bool async)
+ __FORCE_ALIGN_STACK__
+ static void WorkerLoop(int tid, bool async)
+ {
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM: single-threaded. No worker loop; main thread executes tasks directly
++	// via the existing for_mt() fallback path.
++	(void)tid; (void)async;
++	return;
++#endif
+ 	assert(tid != 0);
+ 	SetThreadNum(tid);
+ 	SetInMultiThreadedSection(true);
+diff --git a/rts/System/simd_compat.h b/rts/System/simd_compat.h
+index a405e02..a319bfc 100644
+--- a/rts/System/simd_compat.h
++++ b/rts/System/simd_compat.h
+@@ -1,7 +1,63 @@
+ #ifndef _SIMD_COMPAT_H
+ #define _SIMD_COMPAT_H
+ 
+-#ifdef SSE2NEON
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++    // WASM: provide the subset of SSE intrinsics the engine uses, mapped to
++    // WebAssembly SIMD (<wasm_simd128.h>). Only the ~20 intrinsics Recoil's
++    // engine code directly calls are covered here — lib/* (xsimd, sse2neon,
++    // rapidjson) have their own paths.
++    #include <wasm_simd128.h>
++
++    typedef v128_t __m128;
++    typedef v128_t __m128d;
++    typedef v128_t __m128i;
++
++    // loads / stores (WASM is alignment-agnostic; aligned and unaligned are the same)
++    static inline __m128 _mm_load_ps  (const float* p) { return wasm_v128_load(p); }
++    static inline __m128 _mm_loadu_ps (const float* p) { return wasm_v128_load(p); }
++    static inline void   _mm_store_ps (float* p, __m128 x) { wasm_v128_store(p, x); }
++    static inline void   _mm_storeu_ps(float* p, __m128 x) { wasm_v128_store(p, x); }
++    static inline __m128 _mm_load1_ps (const float* p) { return wasm_f32x4_splat(*p); }
++    static inline __m128 _mm_set_ss   (float x) { return wasm_f32x4_make(x, 0.f, 0.f, 0.f); }
++    static inline __m128 _mm_set1_ps  (float x) { return wasm_f32x4_splat(x); }
++    static inline void   _mm_store_ss (float* p, __m128 x) { *p = wasm_f32x4_extract_lane(x, 0); }
++    static inline float  _mm_cvtss_f32(__m128 x) { return wasm_f32x4_extract_lane(x, 0); }
++
++    // arithmetic
++    static inline __m128 _mm_add_ps(__m128 a, __m128 b)  { return wasm_f32x4_add(a, b); }
++    static inline __m128 _mm_mul_ps(__m128 a, __m128 b)  { return wasm_f32x4_mul(a, b); }
++    static inline __m128 _mm_max_ps(__m128 a, __m128 b)  { return wasm_f32x4_max(a, b); }
++    static inline __m128 _mm_min_ps(__m128 a, __m128 b)  { return wasm_f32x4_min(a, b); }
++    static inline __m128 _mm_sqrt_ss(__m128 a)           { return wasm_f32x4_sqrt(a); }
++    // _mm_max_ss writes max(a[0],b[0]) into lane0 and keeps a[1..3]; approximate with full vector max
++    static inline __m128 _mm_max_ss(__m128 a, __m128 b)  { return wasm_f32x4_max(a, b); }
++
++    // compare
++    static inline __m128 _mm_cmpeq_ps(__m128 a, __m128 b) { return wasm_f32x4_eq(a, b); }
++
++    // shuffle / movehl
++    #define _mm_shuffle_ps(a, b, imm) \
++        wasm_i32x4_shuffle((a), (b), \
++            ((imm) & 3), (((imm) >> 2) & 3), \
++            (((imm) >> 4) & 3) + 4, (((imm) >> 6) & 3) + 4)
++    static inline __m128 _mm_movehl_ps(__m128 a, __m128 b) {
++        return wasm_i32x4_shuffle(a, b, 6, 7, 2, 3);
++    }
++
++    // movemask — builds a 4-bit mask from sign bits of the 4 floats
++    static inline int _mm_movemask_ps(__m128 a) {
++        return wasm_i32x4_bitmask(a);
++    }
++
++    // pause: WASM has no pause; compile as a no-op (threadpool spin is disabled anyway)
++    static inline void _mm_pause() {}
++
++    // Standard imm8 builder macro used by _mm_shuffle_ps callers
++    #ifndef _MM_SHUFFLE
++        #define _MM_SHUFFLE(fp3,fp2,fp1,fp0) (((fp3) << 6) | ((fp2) << 4) | ((fp1) << 2) | (fp0))
++    #endif
++
++#elif defined(SSE2NEON)
+     #include "lib/sse2neon/sse2neon.h"
+ #else
+     #ifdef _MSC_VER
+diff --git a/rts/builds/CMakeLists.txt b/rts/builds/CMakeLists.txt
+index 61835bb..88d97be 100644
+--- a/rts/builds/CMakeLists.txt
++++ b/rts/builds/CMakeLists.txt
+@@ -18,12 +18,17 @@ macro    (create_engine_build_and_install_target targetName)
+ 	file(RELATIVE_PATH relSrcDirPath ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+ 
+ 	set(myBuildTarget spring-${targetName})
+-	set(${targetName}-Deps
+-			engine-${targetName}
+-			basecontent
+-			unitsync
+-			${DEPS_AI_ALL}
+-		)
++	if (EMSCRIPTEN)
++		# unitsync is not built under emscripten (lives in tools/)
++		set(${targetName}-Deps engine-${targetName} basecontent ${DEPS_AI_ALL})
++	else()
++		set(${targetName}-Deps
++				engine-${targetName}
++				basecontent
++				unitsync
++				${DEPS_AI_ALL}
++			)
++	endif()
+ 	if (CREATE_MAN_PAGES)
+ 		list(APPEND ${targetName}-Deps manpages)
+ 	endif()
+diff --git a/rts/builds/headless/CMakeLists.txt b/rts/builds/headless/CMakeLists.txt
+index 7a7a031..b99a09e 100644
+--- a/rts/builds/headless/CMakeLists.txt
++++ b/rts/builds/headless/CMakeLists.txt
+@@ -56,7 +56,7 @@ target_link_libraries(GameHeadless PRIVATE
+ 	headlessStubs
+ 	RmlUi::Core
+ 	prd::jsoncpp
+-	streflop
++	$<$<NOT:$<BOOL:${EMSCRIPTEN}>>:streflop>
+ 	nowide::nowide
+ 	fmt::fmt
+ )
+diff --git a/rts/builds/legacy/CMakeLists.txt b/rts/builds/legacy/CMakeLists.txt
+index cbcc906..e827322 100644
+--- a/rts/builds/legacy/CMakeLists.txt
++++ b/rts/builds/legacy/CMakeLists.txt
+@@ -17,7 +17,7 @@ target_link_libraries(Game PRIVATE
+ 	 RmlUi::RmlUi
+ 	 ${sound-impl}
+ 	 prd::jsoncpp
+-	 streflop
++	 $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:streflop>
+ 	 fmt::fmt
+ )
+ 
+@@ -49,11 +49,11 @@ find_freetype_hack() # hack to find different named freetype.dll
+ find_package_static(Freetype 2.8.1 REQUIRED)
+ list(APPEND engineLibraries Freetype::Freetype)
+ 
+-if    (UNIX)
++if    (UNIX AND NOT EMSCRIPTEN)
+ 	find_package(X11 REQUIRED)
+ 	target_link_libraries(Game PRIVATE X11::Xcursor)
+ 	list(APPEND engineLibraries ${X11_Xcursor_LIB} ${X11_X11_LIB})
+-endif (UNIX)
++endif ()
+ 
+ if (APPLE)
+ 	find_library(COREFOUNDATION_LIBRARY Foundation)
+@@ -80,19 +80,20 @@ list(APPEND engineIncludes ${ENGINE_SRC_ROOT_DIR}/lib/cereal/include)
+ 
+ include_directories(${engineIncludes})
+ 
+-### Build the executable
+-add_executable(engine-legacy ${EXE_FLAGS} ${engineSources} ${ENGINE_ICON} ${engineHeaders})
+-target_link_libraries(engine-legacy ${engineLibraries} Game)
++### Build the executable (skipped under emscripten — we only want headless)
++if (NOT EMSCRIPTEN)
++	add_executable(engine-legacy ${EXE_FLAGS} ${engineSources} ${ENGINE_ICON} ${engineHeaders})
++	target_link_libraries(engine-legacy ${engineLibraries} Game)
+ 
+-# Export symbols for plugin access (replaces CMP0065 OLD behavior)
+-set_target_properties(engine-legacy PROPERTIES ENABLE_EXPORTS TRUE)
+-
+-if(MSVC)
+-    target_link_libraries(engine-legacy engine-natvis)
+-endif()
++	# Export symbols for plugin access (replaces CMP0065 OLD behavior)
++	set_target_properties(engine-legacy PROPERTIES ENABLE_EXPORTS TRUE)
+ 
++	if(MSVC)
++		target_link_libraries(engine-legacy engine-natvis)
++	endif()
+ 
+-### Install the executable
+-install(TARGETS engine-legacy DESTINATION ${BINDIR})
++	### Install the executable
++	install(TARGETS engine-legacy DESTINATION ${BINDIR})
+ 
+-create_engine_build_and_install_target(legacy)
++	create_engine_build_and_install_target(legacy)
++endif()
+diff --git a/rts/lib/luasocket/src/restrictions.h b/rts/lib/luasocket/src/restrictions.h
+index a6bb1ba..0a49cda 100644
+--- a/rts/lib/luasocket/src/restrictions.h
++++ b/rts/lib/luasocket/src/restrictions.h
+@@ -4,6 +4,21 @@
+ #include <string>
+ #include <utility>
+ 
++// musl's <netinet/tcp.h> defines TCP_LISTEN, TCP_ESTABLISHED etc. as macros,
++// which collide with the enum below when this header is preprocessed.
++#ifdef TCP_LISTEN
++    #undef TCP_LISTEN
++#endif
++#ifdef TCP_CONNECT
++    #undef TCP_CONNECT
++#endif
++#ifdef UDP_CONNECT
++    #undef UDP_CONNECT
++#endif
++#ifdef UDP_LISTEN
++    #undef UDP_LISTEN
++#endif
++
+ class TSocketRule {
+ public:
+ 	std::string hostname;
+diff --git a/rts/lib/smmalloc/smmalloc.h b/rts/lib/smmalloc/smmalloc.h
+index 4bc0786..28d07ff 100644
+--- a/rts/lib/smmalloc/smmalloc.h
++++ b/rts/lib/smmalloc/smmalloc.h
+@@ -28,6 +28,7 @@
+ #include <initializer_list>
+ #include <memory>
+ #include <stdint.h>
++#include <type_traits>  // for std::is_trivial etc. — required on libc++
+ 
+ //#define SMMALLOC_STATS_SUPPORT
+ 
+diff --git a/rts/lib/smmalloc/smmalloc_generic.cpp b/rts/lib/smmalloc/smmalloc_generic.cpp
+index 6b3be01..785a395 100644
+--- a/rts/lib/smmalloc/smmalloc_generic.cpp
++++ b/rts/lib/smmalloc/smmalloc_generic.cpp
+@@ -21,6 +21,7 @@
+ // 	THE SOFTWARE.
+ #include "smmalloc.h"
+ #include <stdlib.h>
++#include <cstdlib>  // emscripten libc++ needs this for std::malloc/std::free
+ 
+ struct Header
+ {

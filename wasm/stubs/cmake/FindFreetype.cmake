@@ -1,0 +1,21 @@
+# Freetype shim for Emscripten — uses -sUSE_FREETYPE=1 port.
+if (NOT EMSCRIPTEN)
+    list(REMOVE_ITEM CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    find_package(Freetype ${Freetype_FIND_VERSION})
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    return()
+endif()
+
+set(FREETYPE_FOUND TRUE)
+set(Freetype_FOUND TRUE)
+set(FREETYPE_VERSION_STRING "2.13.2")
+set(FREETYPE_LIBRARY "")
+set(FREETYPE_LIBRARIES "")
+set(FREETYPE_INCLUDE_DIR "")
+set(FREETYPE_INCLUDE_DIRS "")
+
+if (NOT TARGET Freetype::Freetype)
+    add_library(Freetype::Freetype INTERFACE IMPORTED GLOBAL)
+    target_compile_options(Freetype::Freetype INTERFACE "SHELL:-sUSE_FREETYPE=1")
+    target_link_options(Freetype::Freetype INTERFACE "SHELL:-sUSE_FREETYPE=1")
+endif()

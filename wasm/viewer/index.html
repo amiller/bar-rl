@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BAR replay scrubber</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #111; color: #ddd;
+               font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  #wrap { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr auto;
+          grid-template-areas: "head head" "side stage" "side foot"; height: 100vh; }
+  header { grid-area: head; padding: 8px 12px; display: flex; gap: 14px; align-items: center;
+           border-bottom: 1px solid #222; }
+  #side { grid-area: side; border-right: 1px solid #222; overflow: auto;
+          display: flex; flex-direction: column; }
+  #side h3 { margin: 10px 12px 4px; font-size: 11px; text-transform: uppercase;
+             color: #889; letter-spacing: 0.06em; font-weight: normal; }
+  #side .tab-row { display: flex; border-bottom: 1px solid #222; }
+  #side .tab { flex: 1; padding: 8px; text-align: center; cursor: pointer; color: #889;
+               border-bottom: 2px solid transparent; }
+  #side .tab.active { color: #ddd; border-bottom-color: #4aa3ff; }
+  #side ul { list-style: none; margin: 0; padding: 0; }
+  #side li { padding: 6px 12px; cursor: pointer; border-bottom: 1px solid #181818;
+             font-size: 12px; }
+  #side li:hover { background: #1a1f28; }
+  #side li.active { background: #20283a; color: #fff; }
+  #side .sub { color: #667; font-size: 11px; display: block; }
+  #side .status { padding: 6px 12px; color: #889; font-size: 11px; }
+  #side .status.err { color: #ff8080; }
+  #side .filters { padding: 6px 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+  #side .filters select, #side .filters input {
+    background: #191919; color: #ddd; border: 1px solid #333; padding: 2px 6px;
+    border-radius: 3px; font: inherit; font-size: 11px;
+  }
+  header input[type=file] { color: #ddd; }
+  header button { background: #222; color: #ddd; border: 1px solid #333;
+                  padding: 4px 10px; cursor: pointer; border-radius: 3px; }
+  header button:hover { background: #2a2a2a; }
+  header button:disabled { opacity: 0.5; cursor: default; }
+  header label { opacity: 0.7; }
+  #stage { grid-area: stage; position: relative; overflow: hidden; background: #0a0a0a; }
+  canvas { position: absolute; top: 0; left: 0; }
+  footer { grid-area: foot; padding: 10px 12px; border-top: 1px solid #222;
+           display: grid; grid-template-columns: auto 1fr auto; gap: 12px;
+           align-items: center; }
+  #scrubber { width: 100%; }
+  .meta { opacity: 0.7; font-size: 12px; }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <input type="file" id="file" accept=".jsonl,.json">
+    <span class="meta" id="trace-meta">drop a .jsonl trace or pick a file / replay</span>
+    <span style="flex:1"></span>
+    <button id="play">▶ play</button>
+    <label>speed <input id="speed" type="number" value="1" step="0.5" min="0.25" max="32" style="width:55px"></label>
+  </header>
+
+  <div id="side">
+    <div class="tab-row">
+      <div class="tab active" data-tab="traces">local</div>
+      <div class="tab" data-tab="replays">bar-rts</div>
+    </div>
+    <div id="pane-traces">
+      <ul id="trace-list"></ul>
+      <div class="status" id="trace-status">loading…</div>
+    </div>
+    <div id="pane-replays" style="display:none">
+      <div class="filters">
+        <select id="flt-preset">
+          <option value="">any mode</option>
+          <option value="duel">duel</option>
+          <option value="team">team</option>
+          <option value="ffa">ffa</option>
+        </select>
+        <input id="flt-min-ts" type="number" placeholder="min ★" min="0" max="60" style="width:60px">
+        <input id="flt-min-mins" type="number" placeholder="min min" min="0" max="120" style="width:60px">
+        <button id="flt-refresh">refresh</button>
+      </div>
+      <ul id="replay-list"></ul>
+      <div class="status" id="replay-status">click "refresh"</div>
+    </div>
+  </div>
+
+  <div id="stage"><canvas id="c"></canvas></div>
+  <footer>
+    <span class="meta" id="frame-meta">—</span>
+    <input type="range" id="scrubber" min="0" max="0" value="0">
+    <span class="meta" id="unit-meta">—</span>
+  </footer>
+</div>
+<script>
+const TEAM_COLORS = [
+  "#4aa3ff", "#ff5555", "#55dd55", "#ffcc33",
+  "#cc55ff", "#33dddd", "#ff8833", "#eeeeee",
+  "#888888", "#995533", "#ff66aa", "#66aaff",
+];
+const state = {
+  meta: null,
+  frames: [],
+  frameIdx: 0,
+  playing: false,
+  lastTs: 0,
+  iconMap: null,         // defname -> relative png path (e.g. "armvader_0.9.png")
+  iconCache: new Map(),  // cache key -> HTMLCanvasElement (tinted) | "loading" | "missing"
+  currentTraceUrl: null,
+  mapImg: null,          // HTMLImageElement of map minimap (BAR CDN) | null
+  mapImgName: null,      // scriptName currently loaded into mapImg
+  mapHint: null,         // scriptName hint from bar-rts sidebar if meta lacks it
+};
+const CDN_MAP = name =>
+  `https://maps-metadata.beyondallreason.dev/latest/discordPresenceThumb/redir.${encodeURIComponent(name)}.1024.jpg`;
+const $ = id => document.getElementById(id);
+const canvas = $("c"), ctx = canvas.getContext("2d");
+
+function fit() {
+  const stage = document.getElementById("stage");
+  canvas.width = stage.clientWidth;
+  canvas.height = stage.clientHeight;
+  render();
+}
+window.addEventListener("resize", fit);
+
+function parseJSONL(text) {
+  let meta = null; const frames = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let rec; try { rec = JSON.parse(line); } catch { continue; }
+    if (rec.t === "meta") meta = rec;
+    else if (rec.t === "f") frames.push(rec);
+  }
+  return { meta, frames };
+}
+
+// --- Icon rendering: grayscale silhouette PNGs tinted per team color via source-in.
+function getTintedIcon(defName, teamColor) {
+  if (!state.iconMap || !defName) return null;
+  const png = state.iconMap[defName];
+  if (!png) return null;
+  const key = png + "|" + teamColor;
+  let cached = state.iconCache.get(key);
+  if (cached === "loading" || cached === "missing") return null;
+  if (cached) return cached;
+  // not loaded yet → start load
+  state.iconCache.set(key, "loading");
+  const img = new Image();
+  img.onload = () => {
+    // Icons are grayscale silhouettes w/ alpha. We want to tint white→teamColor,
+    // black→black, preserving interior detail. Workflow:
+    //   1. draw icon → off (grayscale + alpha)
+    //   2. multiply teamColor over it → grayscale × color
+    //   3. mask back to the original alpha (multiply also painted transparent pixels)
+    const off = document.createElement("canvas");
+    off.width = img.width; off.height = img.height;
+    const octx = off.getContext("2d");
+    octx.drawImage(img, 0, 0);
+    octx.globalCompositeOperation = "multiply";
+    octx.fillStyle = teamColor;
+    octx.fillRect(0, 0, off.width, off.height);
+    octx.globalCompositeOperation = "destination-in";
+    octx.drawImage(img, 0, 0);
+    state.iconCache.set(key, off);
+    render();
+  };
+  img.onerror = () => { state.iconCache.set(key, "missing"); };
+  img.src = "icons/" + png;
+  return null;
+}
+
+function render() {
+  if (!state.meta || !state.frames.length) {
+    ctx.fillStyle = "#0a0a0a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+  const { mapX, mapZ } = state.meta;
+  const pad = 20;
+  const w = canvas.width - pad * 2, h = canvas.height - pad * 2;
+  const scale = Math.min(w / mapX, h / mapZ);
+  const offX = (canvas.width - mapX * scale) / 2;
+  const offZ = (canvas.height - mapZ * scale) / 2;
+
+  ctx.fillStyle = "#0a0a0a";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (state.mapImg && state.mapImg.complete && state.mapImg.naturalWidth) {
+    ctx.globalAlpha = 0.75;  // dim so team-colored icons read clearly on top
+    ctx.drawImage(state.mapImg, offX, offZ, mapX * scale, mapZ * scale);
+    ctx.globalAlpha = 1;
+  }
+  ctx.strokeStyle = "#1e2a3a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(offX, offZ, mapX * scale, mapZ * scale);
+
+  const fr = state.frames[state.frameIdx];
+  for (const [uid, team, defId, x, z, hp] of fr.u) {
+    const def = state.meta.defs[defId];
+    const r = Math.max(1.5, (def ? def.r : 16) * scale * 0.8);
+    const px = offX + x * scale, pz = offZ + z * scale;
+    const color = TEAM_COLORS[team % TEAM_COLORS.length] || "#888";
+    ctx.globalAlpha = 0.3 + (hp / 100) * 0.7;
+
+    const iconSz = Math.max(10, r * 2.2);  // icons tend to be smaller than sim radius
+    const icon = def && getTintedIcon(def.n, color);
+    if (icon) {
+      ctx.drawImage(icon, px - iconSz / 2, pz - iconSz / 2, iconSz, iconSz);
+    } else {
+      ctx.beginPath();
+      ctx.arc(px, pz, r, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  const minutes = (fr.f / 30 / 60).toFixed(2);
+  $("frame-meta").textContent = `frame ${fr.f}  (${minutes}min)`;
+  $("unit-meta").textContent = `${fr.u.length} units`;
+}
+
+function setFrame(i) {
+  state.frameIdx = Math.max(0, Math.min(state.frames.length - 1, i));
+  $("scrubber").value = state.frameIdx;
+  render();
+}
+
+$("scrubber").addEventListener("input", e => setFrame(+e.target.value));
+
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" && e.target.type !== "range") return;
+  if (e.key === "ArrowRight") { setFrame(state.frameIdx + (e.shiftKey ? 50 : 1)); e.preventDefault(); }
+  else if (e.key === "ArrowLeft") { setFrame(state.frameIdx - (e.shiftKey ? 50 : 1)); e.preventDefault(); }
+  else if (e.key === " ") { $("play").click(); e.preventDefault(); }
+  else if (e.key === "Home") { setFrame(0); e.preventDefault(); }
+  else if (e.key === "End") { setFrame(state.frames.length - 1); e.preventDefault(); }
+});
+
+$("play").addEventListener("click", () => {
+  state.playing = !state.playing;
+  $("play").textContent = state.playing ? "⏸ pause" : "▶ play";
+  if (state.playing) { state.lastTs = 0; requestAnimationFrame(tick); }
+});
+
+function tick(ts) {
+  if (!state.playing) return;
+  if (!state.lastTs) state.lastTs = ts;
+  const dt = (ts - state.lastTs) / 1000;
+  const speed = +$("speed").value || 1;
+  const simSecPerFrame = 6 / 30;
+  const advance = (dt * speed) / simSecPerFrame;
+  if (advance >= 1) {
+    state.lastTs = ts;
+    setFrame(state.frameIdx + Math.floor(advance));
+    if (state.frameIdx >= state.frames.length - 1) {
+      state.playing = false;
+      $("play").textContent = "▶ play";
+      return;
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+function loadMapImage(name) {
+  if (!name || name === state.mapImgName) return;
+  state.mapImgName = name;
+  // No crossOrigin: the imagor endpoint omits CORS headers on the final image.
+  // Plain drawImage still works (canvas will be tainted, but we never read pixels back).
+  const img = new Image();
+  img.onload = render;
+  img.onerror = () => { state.mapImg = null; render(); };
+  img.src = CDN_MAP(name);
+  state.mapImg = img;
+}
+
+async function loadTrace(text) {
+  const { meta, frames } = parseJSONL(text);
+  if (!meta || !frames.length) { alert("no meta or frame records"); return; }
+  state.meta = meta;
+  state.frames = frames;
+  $("scrubber").min = 0;
+  $("scrubber").max = frames.length - 1;
+  setFrame(0);
+  const mapName = meta.mapName || state.mapHint || null;
+  if (mapName) loadMapImage(mapName);
+  else { state.mapImg = null; state.mapImgName = null; }
+  const teams = new Set();
+  for (const fr of frames) for (const [, team] of fr.u) teams.add(team);
+  const mapLabel = mapName ? `${mapName} (${meta.mapX}×${meta.mapZ})` : `${meta.mapX}×${meta.mapZ}`;
+  $("trace-meta").textContent =
+    `${mapLabel} • ${frames.length} snaps • ` +
+    `${Object.keys(meta.defs).length} def types • ${teams.size} teams • ` +
+    `${(frames[frames.length - 1].f / 30 / 60).toFixed(1)} min`;
+}
+
+$("file").addEventListener("change", async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  loadTrace(await f.text());
+});
+
+// --- sidebar: tabs
+for (const t of document.querySelectorAll(".tab")) {
+  t.addEventListener("click", () => {
+    for (const x of document.querySelectorAll(".tab")) x.classList.remove("active");
+    t.classList.add("active");
+    $("pane-traces").style.display = t.dataset.tab === "traces" ? "" : "none";
+    $("pane-replays").style.display = t.dataset.tab === "replays" ? "" : "none";
+    if (t.dataset.tab === "replays" && !$("replay-list").childElementCount) {
+      loadReplays();
+    }
+  });
+}
+
+// --- local traces list
+async function loadLocalTraces() {
+  try {
+    const r = await fetch("/api/traces");
+    if (!r.ok) throw new Error("no api");
+    const { traces } = await r.json();
+    const ul = $("trace-list");
+    ul.innerHTML = "";
+    if (!traces.length) {
+      $("trace-status").textContent = "no traces yet — fetch one from bar-rts tab";
+      return;
+    }
+    for (const t of traces) {
+      const li = document.createElement("li");
+      // sdfz-style name: "YYYY-MM-DD_HH-MM-SS-mmm_<mapName>_<engineVersion>.jsonl"
+      // extract map name as hint so we can fetch the CDN minimap even without meta.mapName.
+      const hint = (() => {
+        const stem = t.name.replace(/\.jsonl$/, "");
+        const parts = stem.split("_");
+        if (parts.length >= 5 && /^\d{4}\.\d{2}\.\d{2}$/.test(parts[parts.length - 1])) {
+          return parts.slice(3, -1).join("_");
+        }
+        return null;
+      })();
+      li.innerHTML = `<span>${t.name}</span><span class="sub">${t.lines} snaps • ${(t.size/1024/1024).toFixed(1)}M${hint ? " • " + hint : ""}</span>`;
+      li.addEventListener("click", async () => {
+        document.querySelectorAll("#trace-list li").forEach(x => x.classList.remove("active"));
+        li.classList.add("active");
+        state.mapHint = hint;
+        const resp = await fetch("/traces/" + encodeURIComponent(t.name));
+        await loadTrace(await resp.text());
+        state.currentTraceUrl = t.name;
+      });
+      ul.appendChild(li);
+    }
+    $("trace-status").textContent = `${traces.length} traces`;
+  } catch (e) {
+    $("trace-status").textContent = "serve via scripts/serve.py for trace list";
+    $("trace-status").classList.add("err");
+  }
+}
+
+// --- bar-rts replay browser (direct API call — CORS: *)
+async function loadReplays() {
+  const s = $("replay-status");
+  s.textContent = "fetching…"; s.classList.remove("err");
+  const p = new URLSearchParams({ limit: "40", endedNormally: "true", hasBots: "false" });
+  const preset = $("flt-preset").value; if (preset) p.set("preset", preset);
+  const minTs = $("flt-min-ts").value;
+  if (minTs) { p.append("tsRange[]", minTs); p.append("tsRange[]", "100"); }
+  const minMins = $("flt-min-mins").value;
+  if (minMins) { p.append("durationRangeMins[]", minMins); p.append("durationRangeMins[]", "600"); }
+  try {
+    const r = await fetch("https://api.bar-rts.com/replays?" + p.toString());
+    const { data } = await r.json();
+    const ul = $("replay-list"); ul.innerHTML = "";
+    for (const rep of data) {
+      const t = new Date(rep.startTime);
+      const dur = Math.round(rep.durationMs / 60000);
+      const map = rep.Map?.scriptName ?? "?";
+      const teams = rep.AllyTeams.map(at =>
+        (at.Players.map(p => p.name).concat((at.AIs||[]).map(a => "AI:"+a.shortName)).join("/") || "—")
+        + (at.winningTeam ? "★" : "")
+      ).join(" vs ");
+      const li = document.createElement("li");
+      li.innerHTML = `<span>${t.toLocaleString([], {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})} · ${dur}m · ${map}</span><span class="sub">${teams}</span>`;
+      li.title = teams;
+      li.addEventListener("click", () => watchReplay(rep.id, li, map));
+      ul.appendChild(li);
+    }
+    s.textContent = `${data.length} replays`;
+  } catch (e) {
+    s.textContent = "error: " + e.message; s.classList.add("err");
+  }
+}
+
+async function watchReplay(id, li, mapName) {
+  const s = $("replay-status");
+  s.classList.remove("err");
+  const origHTML = li.innerHTML;
+  li.innerHTML = `<span class="spin">⟳</span> downloading & capturing…<span class="sub">headless replay is ~1–2× realtime, so ~same length as the match. tail /tmp/bar-viewer.log to watch progress.</span>`;
+  state.mapHint = mapName || null;
+  try {
+    const r = await fetch("/api/capture", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ replayId: id }),
+    });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    const { traceName } = await r.json();
+    const resp = await fetch("/traces/" + encodeURIComponent(traceName));
+    await loadTrace(await resp.text());
+    state.currentTraceUrl = traceName;
+    li.innerHTML = origHTML;
+    // switch to traces tab + refresh
+    document.querySelector('.tab[data-tab="traces"]').click();
+    loadLocalTraces();
+  } catch (e) {
+    li.innerHTML = origHTML;
+    s.textContent = "capture failed: " + e.message; s.classList.add("err");
+  }
+}
+
+$("flt-refresh").addEventListener("click", loadReplays);
+
+// --- icons + bootstrap
+(async () => {
+  try {
+    state.iconMap = await (await fetch("icons.json")).json();
+  } catch { state.iconMap = {}; }
+  await loadLocalTraces();
+  // auto-load the first local trace for convenience
+  try {
+    const r = await fetch("/api/traces");
+    if (r.ok) {
+      const { traces } = await r.json();
+      if (traces.length) {
+        const t = traces[0];
+        const resp = await fetch("/traces/" + encodeURIComponent(t.name));
+        await loadTrace(await resp.text());
+        $("trace-meta").textContent = `auto-loaded ${t.name} — ` + $("trace-meta").textContent;
+      }
+    }
+  } catch {}
+  fit();
+})();
+</script>
+</body>
+</html>
