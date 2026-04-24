@@ -2,6 +2,8 @@
 // Implements the pr-downloader.h public API as no-ops/failures.
 // Replay playback never triggers downloads, so this surface is safe.
 #include "../../../repos/RecoilEngine/tools/pr-downloader/src/pr-downloader.h"
+#include <cstdlib>
+#include <cstdio>
 
 int  DownloadStart()                                                      { return 0; }
 int  DownloadAddByUrl(DownloadEnum::Category, const char*, const char*)   { return -1; }
@@ -18,7 +20,16 @@ bool DownloadDumpSDP(const char*)                                         { retu
 bool ValidateSDP(const char*)                                             { return false; }
 void DownloadDisableLogging(bool)                                         {}
 void SetDownloadListener(IDownloaderProcessUpdateListener)                {}
-char* CalcHash(const char*, int, int)                                     { return nullptr; }
+char* CalcHash(const char* s, int size, int)                              {
+    // Engine code `free()`s the result after lua_pushstring copies it, so we
+    // must use system malloc. Content of the hash doesn't matter for replay
+    // playback; return a simple length-derived 16-byte hex string so the
+    // value is non-empty and distinguishes by input size.
+    char* out = (char*)malloc(33);
+    if (!out) return nullptr;
+    snprintf(out, 33, "%016x%016x", (unsigned)size, (unsigned)(size ^ (s?*s:0)));
+    return out;
+}
 void SetAbortDownloads(bool)                                              {}
 DownloadEnum::Category getPlatformEngineCat()                             { return DownloadEnum::CAT_ENGINE_LINUX64; }
 
