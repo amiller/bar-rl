@@ -3,13 +3,14 @@
 
 Endpoints (layered on top of plain static serving of the wasm/ tree):
 
-    GET  /api/traces                  -> {traces: [{name, size, lines}]}
-    POST /api/capture  {replayId}     -> {traceName}   (downloads + captures if missing)
+    GET  /api/traces                       -> {traces: [{name, size, lines}]}
+    POST /api/capture         {replayId}   -> {jobId, traceName}
+    GET  /api/capture/<jobId>              -> {stage, elapsedSec, traceName?, error?}
 
 Run:  python3 scripts/serve.py [port]     (default 8765)
 Open: http://localhost:8765/viewer/
 """
-import http.server, json, os, socketserver, subprocess, sys, threading, urllib.parse, urllib.request
+import http.server, json, os, socketserver, subprocess, sys, threading, time, urllib.parse, urllib.request
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -18,7 +19,6 @@ CAPTURE = PROJECT / "scripts/capture.sh"
 BAR_DATA = Path.home() / ".local/state/Beyond All Reason"
 BAR_DEMOS = BAR_DATA / "data/demos"
 BAR_ENGINE = BAR_DATA / "engine"
-BAR_MAPS = BAR_DATA / "maps"
 API = "https://api.bar-rts.com/replays"
 STORAGE = "https://storage.uk.cloud.ovh.net/v1/AUTH_10286efc0d334efd917d476d7183232e/BAR/demos/"
 PRD_ENV = {
@@ -29,6 +29,11 @@ PRD_ENV = {
 
 # Serialize captures so we don't double-spawn spring-headless on the same machine.
 _capture_lock = threading.Lock()
+
+# Job state: jobId -> {stage, started, replayId, traceName, error}
+# stages: queued, downloading_map, downloading_sdfz, running_replay, done, error
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
 
 def _list_traces():
     out = []
@@ -57,7 +62,6 @@ def _engine_dir(version: str) -> Path | None:
     if not BAR_ENGINE.is_dir(): return None
     for d in BAR_ENGINE.iterdir():
         if version in d.name and (d / "pr-downloader").exists(): return d
-    # fallback: any installed engine with pr-downloader
     for d in sorted(BAR_ENGINE.iterdir(), reverse=True):
         if (d / "pr-downloader").exists(): return d
     return None
@@ -77,7 +81,6 @@ def _ensure_content(detail: dict):
         r = subprocess.run([str(prdl), "--filesystem-writepath", str(BAR_DATA), flag, val],
                            env=env, capture_output=True, text=True)
         if r.returncode != 0:
-            # Non-fatal: if archive is already present, capture will still succeed.
             print(f"    (pr-downloader exit {r.returncode}: {r.stderr.strip()[-200:]})", flush=True)
 
 def _capture(sdfz: Path) -> Path:
@@ -88,12 +91,52 @@ def _capture(sdfz: Path) -> Path:
     with _capture_lock:
         if trace.exists() and trace.stat().st_size > 0: return trace
         print(f"  capturing {sdfz.name}...", flush=True)
-        # FAST=1 disables non-essential widgets for much faster headless replay.
         r = subprocess.run(["bash", str(CAPTURE), str(sdfz), out_name],
                            env={**os.environ, "FAST": "1"})
         if r.returncode != 0 or not trace.exists():
             raise RuntimeError(f"capture.sh exit {r.returncode}")
     return trace
+
+def _set_stage(job_id: str, stage: str):
+    with _jobs_lock:
+        j = _jobs.get(job_id)
+        if j: j["stage"] = stage
+
+def _run_job(job_id: str, replay_id: str):
+    try:
+        detail = _get_detail(replay_id)
+        fname = detail["fileName"]
+        trace_name = Path(fname).stem + ".jsonl"
+        with _jobs_lock:
+            _jobs[job_id]["traceName"] = trace_name
+        # Stage progression mirrors the helpers below; each step no-ops if
+        # already-on-disk / already-in-cache.
+        _set_stage(job_id, "downloading_map")
+        _ensure_content(detail)
+        _set_stage(job_id, "downloading_sdfz")
+        sdfz = _download_sdfz(detail)
+        _set_stage(job_id, "running_replay")
+        _capture(sdfz)
+        _set_stage(job_id, "done")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        with _jobs_lock:
+            j = _jobs.get(job_id)
+            if j:
+                j["stage"] = "error"
+                j["error"] = str(e)
+
+def _start_job(replay_id: str) -> str:
+    # One job per replay: if a live job for the same replay exists, reuse it.
+    with _jobs_lock:
+        for jid, j in _jobs.items():
+            if j["replayId"] == replay_id and j["stage"] not in ("error",):
+                return jid
+        job_id = f"{int(time.time()*1000):x}-{replay_id[:8]}"
+        _jobs[job_id] = {"stage": "queued", "started": time.time(),
+                         "replayId": replay_id, "traceName": None, "error": None}
+    threading.Thread(target=_run_job, args=(job_id, replay_id), daemon=True).start()
+    return job_id
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -110,6 +153,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/traces":
             return self._send_json(200, {"traces": _list_traces()})
+        if self.path.startswith("/api/capture/"):
+            job_id = self.path.split("/api/capture/", 1)[1]
+            with _jobs_lock:
+                j = _jobs.get(job_id)
+                if not j: return self._send_json(404, {"error": "unknown jobId"})
+                snap = dict(j)
+            snap["elapsedSec"] = round(time.time() - snap["started"], 1)
+            snap.pop("started", None)
+            return self._send_json(200, snap)
         return super().do_GET()
 
     def do_POST(self):
@@ -120,15 +172,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 replay_id = body["replayId"]
             except Exception as e:
                 return self._send_json(400, {"error": f"bad request: {e}"})
-            try:
-                detail = _get_detail(replay_id)
-                _ensure_content(detail)
-                sdfz = _download_sdfz(detail)
-                trace = _capture(sdfz)
-                return self._send_json(200, {"traceName": trace.name})
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                return self._send_json(500, {"error": str(e)})
+            job_id = _start_job(replay_id)
+            with _jobs_lock:
+                trace_name = _jobs[job_id].get("traceName")
+            return self._send_json(200, {"jobId": job_id, "traceName": trace_name})
         self.send_error(404)
 
 class Server(socketserver.ThreadingTCPServer):
@@ -136,7 +183,7 @@ class Server(socketserver.ThreadingTCPServer):
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    os.chdir(PROJECT)  # serve wasm/ root so /viewer/, /traces/, /icons.json resolve
+    os.chdir(PROJECT)
     with Server(("", port), Handler) as s:
         print(f"serving at http://localhost:{port}/viewer/")
         s.serve_forever()

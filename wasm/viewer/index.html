@@ -388,29 +388,60 @@ async function loadReplays() {
   }
 }
 
+const STAGE_LABEL = {
+  queued: "queued",
+  downloading_map: "downloading map",
+  downloading_sdfz: "downloading replay file",
+  running_replay: "running replay (~1–2× realtime)",
+  done: "done",
+  error: "error",
+};
+
 async function watchReplay(id, li, mapName) {
   const s = $("replay-status");
   s.classList.remove("err");
   const origHTML = li.innerHTML;
-  li.innerHTML = `<span class="spin">⟳</span> downloading & capturing…<span class="sub">headless replay is ~1–2× realtime, so ~same length as the match. tail /tmp/bar-viewer.log to watch progress.</span>`;
   state.mapHint = mapName || null;
+  let jobId;
   try {
     const r = await fetch("/api/capture", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ replayId: id }),
     });
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
-    const { traceName } = await r.json();
-    const resp = await fetch("/traces/" + encodeURIComponent(traceName));
-    await loadTrace(await resp.text());
-    state.currentTraceUrl = traceName;
-    li.innerHTML = origHTML;
-    // switch to traces tab + refresh
-    document.querySelector('.tab[data-tab="traces"]').click();
-    loadLocalTraces();
+    ({ jobId } = await r.json());
   } catch (e) {
     li.innerHTML = origHTML;
     s.textContent = "capture failed: " + e.message; s.classList.add("err");
+    return;
+  }
+  // Poll job status every 2s; update the list item in place with stage + elapsed.
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    let snap;
+    try {
+      snap = await (await fetch("/api/capture/" + encodeURIComponent(jobId))).json();
+    } catch (e) { continue; }
+    if (snap.error) { break; }
+    if (snap.stage === "done") {
+      const resp = await fetch("/traces/" + encodeURIComponent(snap.traceName));
+      await loadTrace(await resp.text());
+      state.currentTraceUrl = snap.traceName;
+      li.innerHTML = origHTML;
+      document.querySelector('.tab[data-tab="traces"]').click();
+      loadLocalTraces();
+      return;
+    }
+    if (snap.stage === "error") {
+      li.innerHTML = origHTML;
+      s.textContent = "capture failed: " + (snap.error || "unknown");
+      s.classList.add("err");
+      return;
+    }
+    const label = STAGE_LABEL[snap.stage] || snap.stage;
+    const mins = Math.floor(snap.elapsedSec / 60), secs = Math.round(snap.elapsedSec % 60);
+    const t = mins ? `${mins}m${secs.toString().padStart(2,"0")}s` : `${Math.round(snap.elapsedSec)}s`;
+    li.innerHTML = `<span class="spin">⟳</span> ${label} · ${t}<span class="sub">safe to switch tabs; trace auto-loads when ready</span>`;
   }
 }
 
