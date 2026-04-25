@@ -53,6 +53,25 @@ Unit rendering uses BAR's native minimap icons (grayscale silhouettes,
   CPU-bound. Future: strip the mod's luaui/Widgets/ dir in the sandbox to get
   real 10×+ replay speed.
 
+## WASM port status
+
+The engine builds + runs in the browser via emcc. Built from the upstream
+`2025.06.19` tag (the version the demos are recorded against), with a small
+patch stack in `patches/`. As of `72df6de` the WASM viewer plays test demos
+with **zero `[DESYNC WARNING]`s** against the demos' recorded sync
+checksums — bit-faithful to the recording engine.
+
+    scripts/wasm-configure-browser.sh       # apply patches, configure cmake
+    emmake make -C build-wasm-browser engine-headless
+    # then open viewer/engine.html via scripts/serve.py
+
+`scripts/native-docker-build-tag.sh` produces a parallel native build (in
+ubuntu:24.04 / gcc-13, since host gcc-12 lacks `<format>`) used as a
+diff target during porting.
+
+See `docs/desync-hunt-2026-04.md` for the writeup of how the last-mile
+desync was found — reusable pattern for any deterministic-port task.
+
 ## Next steps
 
 - [ ] Trim mod widgets in the sandbox to speed up capture
