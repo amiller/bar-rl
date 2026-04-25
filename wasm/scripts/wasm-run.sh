@@ -59,6 +59,12 @@ if [[ -s "$BAR_DATA/unit_probe.jsonl" ]]; then
     mv "$BAR_DATA/unit_probe.jsonl" "$DEST"
     echo "probe: $DEST  ($(wc -l < "$DEST") lines)"
 fi
+if [[ -s "$BAR_DATA/outcome.jsonl" ]]; then
+    OUT_NAME="$(basename "$REPLAY" .sdfz)-wasm"
+    DEST="$PROJECT/traces/${OUT_NAME}.outcome.jsonl"
+    mv "$BAR_DATA/outcome.jsonl" "$DEST"
+    echo "outcome: $DEST"
+fi
 # /DumpState output (ReplayGameState-*.txt) — collect any present.
 OUT_NAME="$(basename "$REPLAY" .sdfz)-wasm"
 DUMP_DEST="$PROJECT/traces/${OUT_NAME}.dumpstates"

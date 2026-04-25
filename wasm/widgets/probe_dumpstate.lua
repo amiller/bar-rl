@@ -16,8 +16,9 @@ end
 
 local DUMP_FRAMES = { [60]=true, [120]=true, [600]=true }
 -- Quit shortly after the last dump frame so test loops don't wait for the
--- whole replay to finish. Set 0 to disable.
-local QUIT_FRAME = 610
+-- whole replay to finish. Set 0 to disable (lets the replay play through
+-- to GameOver — needed for outcome-comparison runs).
+local QUIT_FRAME = 0
 -- Set true to enable cheats; gives DumpState access to sync history. Off by
 -- default because the cheat command itself triggers a Sync() and we want to
 -- avoid perturbing the synced run during diagnosis.
