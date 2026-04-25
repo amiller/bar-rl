@@ -654,6 +654,38 @@ index e5a011b..a68b763 100644
  	#if 0
  	if (activeController == nullptr)
  		return true;
+diff --git a/rts/System/Sync/FPUCheck.cpp b/rts/System/Sync/FPUCheck.cpp
+index a971489..26d9d92 100644
+--- a/rts/System/Sync/FPUCheck.cpp
++++ b/rts/System/Sync/FPUCheck.cpp
+@@ -85,6 +85,13 @@ TODO: NEON VERSION
+ 
+ void good_fpu_control_registers(const char* text)
+ {
++#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM has no STMXCSR/LDMXCSR; streflop's inline asm is a no-op so the
++	// FPU env reads back as 0x0000, which trips this check every frame.
++	// We can't pin rounding modes here; skip silently.
++	return;
++#endif
++
+ #ifdef USE_VALGRIND
+ 	static const bool valgrindRunning = RUNNING_ON_VALGRIND;
+ 	if (valgrindRunning) {
+@@ -167,8 +174,13 @@ void good_fpu_init()
+ 
+ #ifdef STREFLOP_H
+ 	#if (defined(STREFLOP_SSE))
++	#if defined(__EMSCRIPTEN__) || defined(__wasm__)
++	// WASM: no x86 SSE detection; we configure STREFLOP_SSE only for the
++	// typedefs (Simple=float, Double=double). Skip the runtime check.
++	#else
+ 	if (sseFlag == 0)
+ 		throw unsupported_error("CPU is missing SSE 1.0 instruction support");
++	#endif
+ 	#elif (defined(STREFLOP_NEON))
+ 	LOG("\tStreflop NEON mode, FPCR verification active");
+ 	{
 diff --git a/rts/System/Threading/SpringThreading.h b/rts/System/Threading/SpringThreading.h
 index d03c5d1..996464e 100644
 --- a/rts/System/Threading/SpringThreading.h
@@ -845,31 +877,27 @@ index 61835bb..88d97be 100644
  		list(APPEND ${targetName}-Deps manpages)
  	endif()
 diff --git a/rts/builds/headless/CMakeLists.txt b/rts/builds/headless/CMakeLists.txt
-index 7a7a031..b99a09e 100644
+index 7a7a031..d111a19 100644
 --- a/rts/builds/headless/CMakeLists.txt
 +++ b/rts/builds/headless/CMakeLists.txt
-@@ -56,7 +56,7 @@ target_link_libraries(GameHeadless PRIVATE
+@@ -56,10 +56,12 @@ target_link_libraries(GameHeadless PRIVATE
  	headlessStubs
  	RmlUi::Core
  	prd::jsoncpp
 -	streflop
-+	$<$<NOT:$<BOOL:${EMSCRIPTEN}>>:streflop>
  	nowide::nowide
  	fmt::fmt
  )
++if (ENABLE_STREFLOP)
++	target_link_libraries(GameHeadless PRIVATE streflop)
++endif()
+ ### Build the executable
+ add_executable(engine-headless ${engineSources} ${ENGINE_ICON})
+ target_link_libraries(engine-headless no-sound ${engineHeadlessLibraries} GameHeadless no-sound)
 diff --git a/rts/builds/legacy/CMakeLists.txt b/rts/builds/legacy/CMakeLists.txt
-index cbcc906..e827322 100644
+index cbcc906..d78af10 100644
 --- a/rts/builds/legacy/CMakeLists.txt
 +++ b/rts/builds/legacy/CMakeLists.txt
-@@ -17,7 +17,7 @@ target_link_libraries(Game PRIVATE
- 	 RmlUi::RmlUi
- 	 ${sound-impl}
- 	 prd::jsoncpp
--	 streflop
-+	 $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:streflop>
- 	 fmt::fmt
- )
- 
 @@ -49,11 +49,11 @@ find_freetype_hack() # hack to find different named freetype.dll
  find_package_static(Freetype 2.8.1 REQUIRED)
  list(APPEND engineLibraries Freetype::Freetype)

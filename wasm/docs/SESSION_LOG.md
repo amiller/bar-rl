@@ -139,6 +139,38 @@ More blockers fixed:
 
 Patches now 10 files across 2 patch files; still idempotent & re-runnable.
 
+### Streflop-SSE attempt #3 (~19:30–21:00)
+
+Tried `ENABLE_STREFLOP=ON` + `STREFLOP_SSE=ON` again, this time with
+`-include cstdlib -include cmath` forced into CXX flags to head off the
+sincos.tbl symbol issue from attempt #2. Build linked successfully (with
+the `-Wunsupported-floating-point-opt` rounding-mode warning emcc emits
+for any `STMXCSR`/`LDMXCSR` inline asm). At runtime the engine never
+advanced past `f=-000001` — `good_fpu_control_registers()` spammed
+"FPUCW 0x0000 instead of 0x003A" every CGame::Update tick, because
+streflop's asm stubs are no-ops in WASM and the env reads back as zero.
+
+After bypassing the FPUCheck loop in WASM (added `__EMSCRIPTEN__`
+early-return in `good_fpu_control_registers`), the engine *did* advance
+— and desync'd at **f=420** (~366 frames *earlier* than streflop=OFF).
+Streflop's typedef wrappers route sin/cos/fmod through its own impls,
+which differ from emscripten's libm; without the rounding-mode pin to
+make them deterministic, they just substitute a different flavor of
+non-determinism for libm's.
+
+**Conclusion (third confirmation):** streflop=ON in WASM is strictly
+worse than streflop=OFF until/unless someone implements WASM-equivalent
+rounding-mode pinning. That deferred work doesn't have an obvious WASM
+path — `wasm_simd128.h` exposes data ops, not rounding-mode control.
+Reverted `wasm-configure.sh` back to ENABLE_STREFLOP=OFF, kept the
+FPUCheck WASM bypass (defensive, no effect with streflop OFF). Also
+fixed an unconditional `target_link_libraries(... streflop)` in
+`rts/builds/headless/CMakeLists.txt` that prevented ENABLE_STREFLOP=OFF
+from actually unlinking streflop.
+
+Trace match against native re-verified: same 408 common frames, same
+divergence at f=786 unit 12910 dx=-0.2 dz=+0.1.
+
 ### Gotchas logged for future
 
 - `cd && foo & bar & wait` — only the first `&`-backgrounded command

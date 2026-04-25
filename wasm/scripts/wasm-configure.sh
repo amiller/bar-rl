@@ -53,9 +53,8 @@ emcmake cmake \
     -DBUILD_spring-dedicated=OFF \
     -DAI_TYPES=NONE \
     -DINSTALL_PORTABLE=OFF \
-    -DSTREFLOP_AUTO=OFF \
-    -DSTREFLOP_SOFT=ON \
     -DENABLE_STREFLOP=OFF \
+    -DSTREFLOP_SSE=OFF \
     -DGFLAGS_INTTYPES_FORMAT=C99 \
     -DBUILD_gflags_LIBS=OFF \
     -DBUILD_TESTING=OFF \
@@ -63,7 +62,7 @@ emcmake cmake \
     -DUSE_MIMALLOC=OFF \
     -DNO_SOUND=ON \
     -DCMAKE_EXE_LINKER_FLAGS="-sINITIAL_MEMORY=128MB -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=8MB -sUSE_PTHREADS=0 -sNODERAWFS=1 -sEXIT_RUNTIME=1 -sASSERTIONS=1 -g1 -fexceptions" \
-    -DCMAKE_CXX_FLAGS="-Wno-error -fexceptions" \
+    -DCMAKE_CXX_FLAGS="-Wno-error -fexceptions -include cstdlib -include cmath" \
     2>&1 | tee "$BUILD/configure.log" || {
       echo
       echo "=== configure failed (expected on first try) ==="
