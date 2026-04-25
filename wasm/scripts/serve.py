@@ -35,13 +35,31 @@ _capture_lock = threading.Lock()
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
+def _trace_summary(p: Path) -> dict:
+    """Cheap stats: meta mapName from first line, lastFrame from tail seek."""
+    name_map, last_frame, lines = None, None, 0
+    with p.open("rb") as fh:
+        first = fh.readline()
+        if first:
+            try: name_map = json.loads(first).get("mapName")
+            except Exception: pass
+        sz = p.stat().st_size
+        fh.seek(max(0, sz - 8192))
+        tail = fh.read().splitlines()
+        for line in reversed(tail):
+            try:
+                r = json.loads(line)
+                if r.get("t") == "f": last_frame = r.get("f"); break
+            except Exception: continue
+    try: lines = sum(1 for _ in p.open())
+    except Exception: pass
+    return {"size": p.stat().st_size, "lines": lines, "mapName": name_map, "lastFrame": last_frame}
+
 def _list_traces():
+    if not TRACES.is_dir(): return []
     out = []
-    if not TRACES.is_dir(): return out
     for p in sorted(TRACES.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try: lines = sum(1 for _ in p.open())
-        except Exception: lines = 0
-        out.append({"name": p.name, "size": p.stat().st_size, "lines": lines})
+        out.append({"name": p.name, **_trace_summary(p)})
     return out
 
 def _get_detail(replay_id: str) -> dict:

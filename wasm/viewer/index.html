@@ -328,7 +328,7 @@ async function loadLocalTraces() {
       const li = document.createElement("li");
       // sdfz-style name: "YYYY-MM-DD_HH-MM-SS-mmm_<mapName>_<engineVersion>.jsonl"
       // extract map name as hint so we can fetch the CDN minimap even without meta.mapName.
-      const hint = (() => {
+      const fnameHint = (() => {
         const stem = t.name.replace(/\.jsonl$/, "");
         const parts = stem.split("_");
         if (parts.length >= 5 && /^\d{4}\.\d{2}\.\d{2}$/.test(parts[parts.length - 1])) {
@@ -336,7 +336,9 @@ async function loadLocalTraces() {
         }
         return null;
       })();
-      li.innerHTML = `<span>${t.name}</span><span class="sub">${t.lines} snaps • ${(t.size/1024/1024).toFixed(1)}M${hint ? " • " + hint : ""}</span>`;
+      const hint = t.mapName || fnameHint;   // prefer meta-record mapName when present
+      const dur = t.lastFrame ? `${(t.lastFrame/30/60).toFixed(1)}min` : `${t.lines} snaps`;
+      li.innerHTML = `<span>${t.name}</span><span class="sub">${dur} • ${(t.size/1024/1024).toFixed(1)}M${hint ? " • " + hint : ""}</span>`;
       li.addEventListener("click", async () => {
         document.querySelectorAll("#trace-list li").forEach(x => x.classList.remove("active"));
         li.classList.add("active");
