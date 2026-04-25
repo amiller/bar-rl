@@ -109,6 +109,7 @@ const state = {
   mapImg: null,          // HTMLImageElement of map minimap (BAR CDN) | null
   mapImgName: null,      // scriptName currently loaded into mapImg
   mapHint: null,         // scriptName hint from bar-rts sidebar if meta lacks it
+  zoom: 1, panX: 0, panZ: 0,  // view transform on top of fit-scale; reset on dbl-click / "0"
 };
 const CDN_MAP = name =>
   `https://maps-metadata.beyondallreason.dev/latest/discordPresenceThumb/redir.${encodeURIComponent(name)}.1024.jpg`;
@@ -178,9 +179,10 @@ function render() {
   const { mapX, mapZ } = state.meta;
   const pad = 20;
   const w = canvas.width - pad * 2, h = canvas.height - pad * 2;
-  const scale = Math.min(w / mapX, h / mapZ);
-  const offX = (canvas.width - mapX * scale) / 2;
-  const offZ = (canvas.height - mapZ * scale) / 2;
+  const baseScale = Math.min(w / mapX, h / mapZ);
+  const scale = baseScale * state.zoom;
+  const offX = (canvas.width - mapX * scale) / 2 + state.panX;
+  const offZ = (canvas.height - mapZ * scale) / 2 + state.panZ;
 
   ctx.fillStyle = "#0a0a0a";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -226,6 +228,44 @@ function setFrame(i) {
 }
 
 $("scrubber").addEventListener("input", e => setFrame(+e.target.value));
+
+// --- pan + zoom on the map canvas
+canvas.style.cursor = "grab";
+canvas.addEventListener("wheel", e => {
+  if (!state.meta) return;
+  e.preventDefault();
+  const { mapX, mapZ } = state.meta;
+  const pad = 20, w = canvas.width - pad * 2, h = canvas.height - pad * 2;
+  const baseScale = Math.min(w / mapX, h / mapZ);
+  const r = canvas.getBoundingClientRect();
+  const cx = e.clientX - r.left, cy = e.clientY - r.top;
+  // world point under cursor before zoom
+  const oldScale = baseScale * state.zoom;
+  const oldOffX = (canvas.width - mapX * oldScale) / 2 + state.panX;
+  const oldOffZ = (canvas.height - mapZ * oldScale) / 2 + state.panZ;
+  const wx = (cx - oldOffX) / oldScale, wz = (cy - oldOffZ) / oldScale;
+  // apply zoom (clamped 0.25× … 20×)
+  const factor = Math.exp(-e.deltaY * 0.0015);
+  state.zoom = Math.max(0.25, Math.min(20, state.zoom * factor));
+  // recompute pan so (wx, wz) stays under cursor
+  const newScale = baseScale * state.zoom;
+  state.panX = cx - wx * newScale - (canvas.width - mapX * newScale) / 2;
+  state.panZ = cy - wz * newScale - (canvas.height - mapZ * newScale) / 2;
+  render();
+}, { passive: false });
+let drag = null;
+canvas.addEventListener("mousedown", e => {
+  drag = { x: e.clientX, y: e.clientY, panX: state.panX, panZ: state.panZ };
+  canvas.style.cursor = "grabbing";
+});
+window.addEventListener("mousemove", e => {
+  if (!drag) return;
+  state.panX = drag.panX + (e.clientX - drag.x);
+  state.panZ = drag.panZ + (e.clientY - drag.y);
+  render();
+});
+window.addEventListener("mouseup", () => { drag = null; canvas.style.cursor = "grab"; });
+canvas.addEventListener("dblclick", () => { state.zoom = 1; state.panX = state.panZ = 0; render(); });
 
 window.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT" && e.target.type !== "range") return;
@@ -278,6 +318,7 @@ async function loadTrace(text) {
   if (!meta || !frames.length) { alert("no meta or frame records"); return; }
   state.meta = meta;
   state.frames = frames;
+  state.zoom = 1; state.panX = 0; state.panZ = 0;
   $("scrubber").min = 0;
   $("scrubber").max = frames.length - 1;
   setFrame(0);
