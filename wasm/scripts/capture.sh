@@ -137,7 +137,7 @@ cat > "$SANDBOX/_launch.txt" <<EOF
 [game]
 {
     demofile=$REPLAY;
-    hostport=31337;
+    hostport=$((31337 + RANDOM % 10000));
 }
 EOF
 
