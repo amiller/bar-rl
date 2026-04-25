@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BAR Replay Viewer (WASM, 2025.06.19)</title>
+<style>
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; }
+  fieldset { margin: 1rem 0; }
+  #log { background: #111; color: #ddd; padding: 0.5rem; height: 60vh;
+         overflow-y: scroll; font-size: 12px; white-space: pre-wrap; }
+  .hint { color: #666; font-size: 0.9rem; }
+  button, input[type=text] { font: inherit; padding: 0.3rem 0.6rem; }
+  #base-status { color: #c80; }
+  #base-status.ok { color: #080; }
+</style>
+</head>
+<body>
+  <h1>BAR Replay Viewer — headless engine in your browser</h1>
+  <p class="hint">
+    Built from RecoilEngine tag <code>2025.06.19</code> — same engine that
+    recorded the demos. No graphics yet (headless). Engine logs land below.
+  </p>
+
+  <fieldset>
+    <legend>1. Base content</legend>
+    <p>
+      The engine needs <code>base/</code> archives (springcontent.sdz, etc.)
+      to load any replay. Pick the folder containing those.
+      <span id="base-status">— not loaded —</span>
+    </p>
+    <input type="file" id="base-files" multiple webkitdirectory directory>
+    <span class="hint">(picks a folder; files stay in browser memory)</span>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. Replay</legend>
+    <p>Pick a <code>.sdfz</code> demo to play back.</p>
+    <input type="file" id="replay-file" accept=".sdfz">
+    <button id="run-btn" disabled>Run</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Engine log</legend>
+    <div id="log"></div>
+  </fieldset>
+
+<script type="module">
+const $log = document.getElementById('log');
+const $baseStatus = document.getElementById('base-status');
+const $baseFiles = document.getElementById('base-files');
+const $replayFile = document.getElementById('replay-file');
+const $runBtn = document.getElementById('run-btn');
+
+const print = (msg) => { $log.textContent += msg + '\n'; $log.scrollTop = $log.scrollHeight; };
+
+let baseFiles = null;
+let replayBytes = null;
+let Module = null;
+
+$baseFiles.addEventListener('change', () => {
+  baseFiles = $baseFiles.files;
+  $baseStatus.textContent = `— ${baseFiles.length} files —`;
+  $baseStatus.className = baseFiles.length > 0 ? 'ok' : '';
+  maybeEnableRun();
+});
+
+$replayFile.addEventListener('change', async () => {
+  const f = $replayFile.files[0];
+  if (!f) return;
+  replayBytes = new Uint8Array(await f.arrayBuffer());
+  print(`[host] loaded replay ${f.name} (${replayBytes.byteLength} bytes)`);
+  maybeEnableRun();
+});
+
+function maybeEnableRun() {
+  $runBtn.disabled = !(baseFiles && baseFiles.length && replayBytes);
+}
+
+$runBtn.addEventListener('click', async () => {
+  $runBtn.disabled = true;
+  print('[host] booting WASM engine…');
+
+  // The emscripten -sMODULARIZE=1 -sEXPORT_NAME=createSpring build exposes
+  // a default export; load it dynamically so the page is interactive without
+  // waiting on the 16MB wasm download.
+  const { default: createSpring } = await import('../build-wasm-browser/spring-headless.js');
+
+  Module = await createSpring({
+    print:    (s) => print(s),
+    printErr: (s) => print('[err] ' + s),
+    locateFile: (p) => '../build-wasm-browser/' + p,
+  });
+
+  print('[host] engine booted, planting files in MEMFS…');
+
+  Module.FS.mkdirTree('/work');
+  for (const f of baseFiles) {
+    const rel  = f.webkitRelativePath || f.name;
+    const path = '/work/' + rel;
+    const dir  = path.substring(0, path.lastIndexOf('/'));
+    Module.FS.mkdirTree(dir);
+    Module.FS.writeFile(path, new Uint8Array(await f.arrayBuffer()));
+  }
+  print(`[host] planted ${baseFiles.length} base files`);
+
+  Module.FS.writeFile('/work/replay.sdfz', replayBytes);
+  print('[host] planted /work/replay.sdfz');
+
+  print('[host] callMain(["--write-dir","/work","--isolation=true","/work/replay.sdfz"])');
+  try {
+    Module.callMain(['--write-dir', '/work', '--isolation=true', '/work/replay.sdfz']);
+  } catch (e) {
+    print('[host] callMain threw: ' + e);
+  }
+});
+</script>
+</body>
+</html>

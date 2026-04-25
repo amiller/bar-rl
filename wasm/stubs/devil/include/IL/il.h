@@ -105,6 +105,7 @@ void      ilBindImage(ILuint image);
 
 ILboolean ilLoadL(ILenum type, const void *lump, ILuint size);
 ILuint    ilSaveL(ILenum type, void *lump, ILuint size);
+ILboolean ilSave(ILenum type, const ILchar* filename);
 ILboolean ilTexImage(ILuint w, ILuint h, ILuint depth, ILubyte bpp,
                      ILenum format, ILenum type, void *data);
 ILubyte*  ilGetData(void);

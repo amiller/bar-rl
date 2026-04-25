@@ -1,6 +1,9 @@
 build-wasm/
+build-wasm-2025.06.19/
+build-wasm-browser/
 build-native/
 build-native-docker/
+build-native-2025.06.19/
 tools/
 traces/*.jsonl
 traces/*.infolog.gz

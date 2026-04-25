@@ -1,0 +1,13 @@
+/*
+  Cache-Control: public, max-age=300
+
+# WASM binary: long cache, content-hashed in a real deploy
+/build-wasm-browser/spring-headless.wasm
+  Cache-Control: public, max-age=86400
+  Content-Type: application/wasm
+
+# If we ever turn pthreads on, these enable SharedArrayBuffer in the browser.
+# Cloudflare Pages honors `_headers`; GitHub Pages does not.
+/viewer/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp

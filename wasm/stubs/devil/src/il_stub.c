@@ -55,6 +55,11 @@ ILuint ilSaveL(ILenum type, void *lump, ILuint size) {
     (void)type; (void)lump; (void)size;
     return 0;
 }
+/* ilSave(type, filename) — file-path save. Stub: pretend success. */
+ILboolean ilSave(ILenum type, const ILchar* filename) {
+    (void)type; (void)filename;
+    return IL_TRUE;
+}
 ILboolean ilTexImage(ILuint w, ILuint h, ILuint d, ILubyte bpp,
                      ILenum format, ILenum type, void *data) {
     (void)d; (void)data;
