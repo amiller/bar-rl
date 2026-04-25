@@ -64,7 +64,7 @@ REPLAY_DIR="$(cd "$(dirname "$REPLAY")" && pwd)"
 echo "running headless inside $IMAGE..."
 t0=$(date +%s)
 docker run --rm \
-    -e SYNC_PROBE_ABORT_FRAME -e SYNC_PROBE_ABORT_REC \
+    -e SYNC_PROBE_ABORT_FRAME -e SYNC_PROBE_ABORT_REC -e SYNC_PROBE_DUMP_ANIMS \
     -v "$SANDBOX:$SANDBOX" \
     -v "$BAR_DATA:$BAR_DATA:ro" \
     -v "$REPLAY_DIR:$REPLAY_DIR:ro" \
