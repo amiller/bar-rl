@@ -1,0 +1,45 @@
+# Native engine build env. Host (Mint 21.3 / jammy) caps at libstdc++-12 which
+# lacks <format>; ubuntu:24.04 ships gcc-13 with full C++23 <format> support.
+# We use this purely to produce a `spring-headless` ELF that matches the same
+# source HEAD as our WASM build, so DumpState dumps are byte-comparable.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        ca-certificates \
+        pkg-config \
+        zlib1g-dev \
+        libfreetype-dev \
+        libfontconfig1-dev \
+        libexpat1-dev \
+        libsdl2-dev \
+        libgl-dev \
+        libglew-dev \
+        libopenal-dev \
+        libcurl4-openssl-dev \
+        libxcursor-dev \
+        libdevil-dev \
+        libunwind-dev \
+        libminizip-dev \
+        libvorbis-dev \
+        libogg-dev \
+        p7zip-full \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same UID/GID as host so build outputs aren't root-owned on bind mount.
+# ubuntu:24.04 ships a stock `ubuntu` user at UID 1000 — drop it first so we
+# can create `bar` at the host's UID/GID without collisions.
+ARG UID=1000
+ARG GID=1000
+RUN userdel -r ubuntu 2>/dev/null || true \
+ && groupdel ubuntu 2>/dev/null || true \
+ && groupadd -g ${GID} bar \
+ && useradd -m -u ${UID} -g ${GID} -s /bin/bash bar
+
+USER bar
+WORKDIR /work

@@ -1,4 +1,7 @@
 build-wasm/
+build-native/
+build-native-docker/
 tools/
 traces/*.jsonl
 traces/*.infolog.gz
+traces/*.dumpstates/

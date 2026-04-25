@@ -14,15 +14,15 @@ function widget:GetInfo()
     }
 end
 
-local DUMP_FRAMES = { [60]=true, [120]=true, [600]=true }
+local DUMP_FRAMES = { [60]=true, [120]=true, [1800]=true, [5400]=true, [10800]=true }
 -- Quit shortly after the last dump frame so test loops don't wait for the
 -- whole replay to finish. Set 0 to disable (lets the replay play through
 -- to GameOver — needed for outcome-comparison runs).
-local QUIT_FRAME = 0
--- Set true to enable cheats; gives DumpState access to sync history. Off by
--- default because the cheat command itself triggers a Sync() and we want to
--- avoid perturbing the synced run during diagnosis.
-local ENABLE_CHEATS = false
+local QUIT_FRAME = 10810
+-- Set true to enable cheats; gives DumpState access to sync history.
+-- Required for the per-Sync history dump (engine has DumpHistory() guarded
+-- on cheats||serverRequest).
+local ENABLE_CHEATS = true
 
 local fired = false
 function widget:GameFrame(f)

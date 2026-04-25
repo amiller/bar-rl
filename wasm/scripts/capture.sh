@@ -91,7 +91,8 @@ t = open(p).read()
 # Names of our project-side widgets (in $PROJECT/widgets/) that must be force-
 # enabled so they actually run during headless playback. Add new widgets here.
 KEEP = [("State Dump", 12345), ("Unit Motion Probe", 12346),
-        ("Probe DumpState Trigger", 12347), ("Outcome Recorder", 12348)]
+        ("Probe DumpState Trigger", 12347), ("Outcome Recorder", 12348),
+        ("Interactions Probe", 12349)]
 
 # Force-enable each KEEP widget by patching the BYAR config's order list.
 for name, prio in KEEP:
@@ -165,6 +166,11 @@ if [[ -s "$SANDBOX/state_trace.jsonl" ]]; then
     if [[ -s "$SANDBOX/outcome.jsonl" ]]; then
         mv "$SANDBOX/outcome.jsonl" "$TRACES/${OUT_NAME}.outcome.jsonl"
         echo "outcome: $TRACES/${OUT_NAME}.outcome.jsonl"
+    fi
+    # Interactions widget output (per-frame damage/death/spawn events).
+    if [[ -s "$SANDBOX/interactions.jsonl" ]]; then
+        mv "$SANDBOX/interactions.jsonl" "$TRACES/${OUT_NAME}.interactions.jsonl"
+        echo "interactions: $TRACES/${OUT_NAME}.interactions.jsonl ($(wc -l < "$TRACES/${OUT_NAME}.interactions.jsonl") lines)"
     fi
     # /DumpState output (if any) — ReplayGameState-*.txt files in write-dir.
     DUMP_DEST="$TRACES/${OUT_NAME}.dumpstates"
