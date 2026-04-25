@@ -1,10 +1,10 @@
-# ZLIB shim for Emscripten builds — redirects find_package(ZLIB) to
-# emscripten's -sUSE_ZLIB=1 port via an INTERFACE imported target.
+# ZLIB shim:
+#   - Emscripten: redirect to -sUSE_ZLIB=1 port via INTERFACE imported target.
+#   - Native (BAR_USE_STUBS=1): defer to CMake's stock FindZLIB.cmake by
+#     explicit path; naive find_package() recursion-traps because
+#     list(REMOVE_ITEM) doesn't propagate to the recursive call's scope.
 if (NOT EMSCRIPTEN)
-    # Fall through to CMake's bundled FindZLIB.cmake
-    list(REMOVE_ITEM CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-    find_package(ZLIB ${ZLIB_FIND_VERSION})
-    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    include("${CMAKE_ROOT}/Modules/FindZLIB.cmake")
     return()
 endif()
 

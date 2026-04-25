@@ -1,7 +1,8 @@
 if (NOT EMSCRIPTEN)
-    list(REMOVE_ITEM CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-    find_package(Fontconfig ${Fontconfig_FIND_VERSION})
-    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    # Defer to CMake's stock FindFontconfig.cmake by explicit path; naive
+    # find_package() recursion-traps because list(REMOVE_ITEM) doesn't
+    # propagate to the recursive call's scope.
+    include("${CMAKE_ROOT}/Modules/FindFontconfig.cmake")
     return()
 endif()
 # Headless replay doesn't need font config discovery — stub as empty interface.

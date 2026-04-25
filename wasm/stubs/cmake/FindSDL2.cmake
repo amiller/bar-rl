@@ -1,8 +1,9 @@
-# SDL2 shim for Emscripten — uses -sUSE_SDL=2 port.
+# SDL2 shim:
+#   - Emscripten: redirect to -sUSE_SDL=2 port via INTERFACE imported target.
+#   - Native (BAR_USE_STUBS=1): there's no stock FindSDL2.cmake; SDL2's
+#     installed sdl2-config.cmake provides a CONFIG package. Use that.
 if (NOT EMSCRIPTEN)
-    list(REMOVE_ITEM CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-    find_package(SDL2 ${SDL2_FIND_VERSION})
-    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    find_package(SDL2 CONFIG REQUIRED)
     return()
 endif()
 

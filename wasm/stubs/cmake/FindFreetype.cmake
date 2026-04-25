@@ -1,8 +1,10 @@
-# Freetype shim for Emscripten — uses -sUSE_FREETYPE=1 port.
+# Freetype shim:
+#   - Emscripten: use the -sUSE_FREETYPE=1 port (no real Freetype needed).
+#   - Native (BAR_USE_STUBS=1): defer to CMake's stock FindFreetype.cmake.
+#     The naive `find_package(Freetype)` below would re-find ourselves and
+#     infinite-loop, so include the standard module by explicit path.
 if (NOT EMSCRIPTEN)
-    list(REMOVE_ITEM CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-    find_package(Freetype ${Freetype_FIND_VERSION})
-    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    include("${CMAKE_ROOT}/Modules/FindFreetype.cmake")
     return()
 endif()
 
