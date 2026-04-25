@@ -1,22 +1,22 @@
 #!/bin/bash
-# First-attempt WASM configure step. Will fail — the purpose is to surface
-# which dependencies/platform checks break so we can address them one at a time.
-# Logs the full error surface to build-wasm/configure.log.
+# Configure a NATIVE x86_64 build of spring-headless from the same RecoilEngine
+# source we use for the WASM build. Lets us compare native-vs-WASM where both
+# come from identical source + same -ffp-contract / streflop config — isolating
+# whether divergence is source-deterministic or compiler/build-flag-driven.
 set -eu
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT="$SCRIPT_DIR/.."
 RECOIL="$PROJECT/../repos/RecoilEngine"
 
-# shellcheck source=./wasm-env.sh
-source "$SCRIPT_DIR/wasm-env.sh"
+[[ -d "$RECOIL" ]] || { echo "no Recoil at $RECOIL"; exit 1; }
 
-# Point Recoil's CMake at our bundled stubs (DevIL, maybe more over time)
+# Use the same stubs (DevIL, pr-downloader) as the WASM build, so we don't
+# require system DevIL or curl 7.85+. The CMakeLists honors BAR_USE_STUBS
+# (added via our local patch) to take the same code path as EMSCRIPTEN.
 export BAR_WASM_STUBS="$PROJECT/stubs"
+export BAR_USE_STUBS=1
 
-[[ -d "$RECOIL" ]] || { echo "no Recoil at $RECOIL — did you sparse-clone it?"; exit 1; }
-
-# Apply stacked patches (idempotent — skips if already applied).
-# `002-streflop-*.patch` targets a submodule tree; apply it inside that submodule.
+# Apply the same patch stack we use for WASM (idempotent).
 PATCHES="$PROJECT/patches"
 apply_in() {
     local dir="$1" patch="$2"
@@ -25,7 +25,7 @@ apply_in() {
     elif (cd "$dir" && git apply "$patch" 2>/dev/null); then
         echo "patch applied: $(basename "$patch")"
     else
-        echo "WARN: could not apply $(basename "$patch") in $dir"
+        echo "WARN: could not apply $(basename "$patch")"
     fi
 }
 if [[ -d "$PATCHES" ]]; then
@@ -38,12 +38,13 @@ if [[ -d "$PATCHES" ]]; then
     done
 fi
 
-BUILD="$PROJECT/build-wasm"
+BUILD="$PROJECT/build-native"
 mkdir -p "$BUILD"
 echo "logging to $BUILD/configure.log"
 
-# Start minimal: headless only, no graphics/audio/network. Shim OFF-by-default options.
-emcmake cmake \
+# Same key flags as WASM where applicable: streflop=ON / SSE / no fp-contract.
+# Pure native: no emcmake, real DevIL/SDL2/etc. expected from system.
+cmake \
     -S "$RECOIL" \
     -B "$BUILD" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -62,11 +63,10 @@ emcmake cmake \
     -DLTO=OFF \
     -DUSE_MIMALLOC=OFF \
     -DNO_SOUND=ON \
-    -DCMAKE_EXE_LINKER_FLAGS="-sINITIAL_MEMORY=128MB -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=8MB -sUSE_PTHREADS=0 -sNODERAWFS=1 -sEXIT_RUNTIME=1 -sASSERTIONS=1 -g1 -fexceptions" \
-    -DCMAKE_CXX_FLAGS="-Wno-error -fexceptions -include cstdlib -include cmath -ffp-contract=off" \
+    -DCMAKE_CXX_FLAGS="-Wno-error -ffp-contract=off" \
     2>&1 | tee "$BUILD/configure.log" || {
       echo
-      echo "=== configure failed (expected on first try) ==="
-      echo "tail of configure.log:"; tail -30 "$BUILD/configure.log"
+      echo "=== configure failed ==="
+      tail -30 "$BUILD/configure.log"
       exit 2
     }

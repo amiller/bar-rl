@@ -3,9 +3,11 @@ repos/
 
 # Build artifacts
 wasm/build-wasm/
+wasm/build-native/
 wasm/tools/
 wasm/traces/*.jsonl
 wasm/traces/*.infolog.gz
+wasm/traces/*.dumpstates/
 
 # Captured traces (per-run, not worth versioning)
 replays/traces/*.jsonl

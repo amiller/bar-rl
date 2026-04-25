@@ -35,7 +35,7 @@ fi
 # shellcheck source=./wasm-env.sh
 source "$SCRIPT_DIR/wasm-env.sh" >/dev/null 2>&1
 
-rm -f "$BAR_DATA/state_trace.jsonl"
+rm -f "$BAR_DATA/state_trace.jsonl" "$BAR_DATA/unit_probe.jsonl"
 echo "running ${REPLAY##*/} (timeout ${TIMEOUT}s)..."
 cd "$ENGINE_DIR"
 timeout "$TIMEOUT" node --max-old-space-size=8192 "$WASM" \
@@ -52,4 +52,25 @@ if [[ -s "$BAR_DATA/state_trace.jsonl" ]]; then
     mkdir -p "$PROJECT/traces"
     mv "$BAR_DATA/state_trace.jsonl" "$DEST"
     echo "trace: $DEST  ($(wc -l < "$DEST") lines, $(du -h "$DEST" | cut -f1))"
+fi
+if [[ -s "$BAR_DATA/unit_probe.jsonl" ]]; then
+    OUT_NAME="$(basename "$REPLAY" .sdfz)-wasm"
+    DEST="$PROJECT/traces/${OUT_NAME}.probe.jsonl"
+    mv "$BAR_DATA/unit_probe.jsonl" "$DEST"
+    echo "probe: $DEST  ($(wc -l < "$DEST") lines)"
+fi
+# /DumpState output (ReplayGameState-*.txt) — collect any present.
+OUT_NAME="$(basename "$REPLAY" .sdfz)-wasm"
+DUMP_DEST="$PROJECT/traces/${OUT_NAME}.dumpstates"
+mkdir -p "$DUMP_DEST"
+found_dump=0
+for dumpf in "$ENGINE_DIR"/ReplayGameState-*.txt "$BAR_DATA"/ReplayGameState-*.txt; do
+    [[ -e "$dumpf" ]] || continue
+    mv "$dumpf" "$DUMP_DEST/"
+    found_dump=$((found_dump + 1))
+done
+if (( found_dump > 0 )); then
+    echo "dumpstates: $DUMP_DEST ($found_dump files)"
+else
+    rmdir "$DUMP_DEST" 2>/dev/null
 fi

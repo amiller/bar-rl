@@ -9,13 +9,14 @@ OUT_NAME="${2:-$(basename "$REPLAY" .sdfz)}"
 PROJECT="$HOME/projects/bar/wasm"
 BAR_DATA="$HOME/.local/state/Beyond All Reason"
 ENGINE_DIR="$BAR_DATA/engine/recoil_2025.06.19"
-HEADLESS="$ENGINE_DIR/spring-headless"
-WIDGET="$PROJECT/widgets/state_dump.lua"
+# Override which engine binary to run (e.g. our locally-built one) via env.
+HEADLESS="${HEADLESS:-$ENGINE_DIR/spring-headless}"
+WIDGETS_DIR="$PROJECT/widgets"
 TRACES="$PROJECT/traces"
 
 [[ -x "$HEADLESS" ]]    || { echo "no spring-headless at $HEADLESS"; exit 1; }
 [[ -f "$REPLAY" ]]      || { echo "no replay at $REPLAY"; exit 1; }
-[[ -f "$WIDGET" ]]      || { echo "no widget at $WIDGET"; exit 1; }
+[[ -d "$WIDGETS_DIR" ]] || { echo "no widgets dir at $WIDGETS_DIR"; exit 1; }
 
 # Fetch content the replay needs (map + game) via the bar-replays helper if missing.
 # This re-uses the same pr-downloader invocation we pinned down earlier.
@@ -65,7 +66,7 @@ for d in engine pool packages rapid maps games; do
 done
 mkdir -p "$SANDBOX/LuaUI/Widgets" "$SANDBOX/LuaUI/Config"
 [[ -e "$BAR_DATA/LuaUI/Fonts"  ]] && ln -s "$BAR_DATA/LuaUI/Fonts"  "$SANDBOX/LuaUI/Fonts"
-cp "$WIDGET" "$SANDBOX/LuaUI/Widgets/state_dump.lua"
+cp "$WIDGETS_DIR/"*.lua "$SANDBOX/LuaUI/Widgets/"
 
 # Copy the real BYAR.lua config so mod widgets keep their settings, then pre-enable
 # our State Dump widget. BAR's barwidgets.lua refuses to auto-enable new user widgets;
@@ -87,18 +88,27 @@ import re, sys
 p, fast = sys.argv[1], sys.argv[2] == "1"
 t = open(p).read()
 
-# Force-enable our widget
-if '"State Dump"' in t:
-    t = re.sub(r'\["State Dump"\]\s*=\s*\d+', '["State Dump"] = 12345', t)
-else:
-    new, n = re.subn(r'(\border\s*=\s*\{)', r'\1\n\t\t["State Dump"] = 12345,', t, count=1)
-    if n == 0:
-        raise SystemExit("could not find `order = {` in config to insert State Dump")
-    t = new
+# Names of our project-side widgets (in $PROJECT/widgets/) that must be force-
+# enabled so they actually run during headless playback. Add new widgets here.
+KEEP = [("State Dump", 12345), ("Unit Motion Probe", 12346),
+        ("Probe DumpState Trigger", 12347)]
+
+# Force-enable each KEEP widget by patching the BYAR config's order list.
+for name, prio in KEEP:
+    needle = f'"{name}"'
+    if needle in t:
+        t = re.sub(rf'\["{re.escape(name)}"\]\s*=\s*\d+', f'["{name}"] = {prio}', t)
+    else:
+        new, n = re.subn(r'(\border\s*=\s*\{)',
+                         rf'\1\n\t\t["{name}"] = {prio},', t, count=1)
+        if n == 0:
+            raise SystemExit(f"could not find `order = {{` in config to insert {name}")
+        t = new
 
 # FAST mode: disable every other user widget to dodge CPU-bound gfx/gui widgets.
 # Gadgets (sim-side) continue to run from the game archive regardless.
 if fast:
+    keep_names = {name for name, _ in KEEP}
     lines, out, in_order = t.splitlines(), [], False
     for ln in lines:
         if not in_order and re.search(r'\border\s*=\s*\{', ln):
@@ -106,7 +116,7 @@ if fast:
         if in_order and ln.strip().startswith("}"):
             in_order = False; out.append(ln); continue
         if in_order:
-            if '"State Dump"' in ln or "State Dump" in ln:
+            if any(f'"{n}"' in ln for n in keep_names):
                 out.append(ln)  # keep ours enabled
             else:
                 out.append(re.sub(r'=\s*\d+', '= 0', ln))
@@ -145,6 +155,25 @@ if [[ -s "$SANDBOX/state_trace.jsonl" ]]; then
     # Compress a copy of the engine log for future debugging.
     if [[ -s "$SANDBOX/infolog.txt" ]]; then
         gzip -c "$SANDBOX/infolog.txt" > "$TRACES/${OUT_NAME}.infolog.gz"
+    fi
+    # Probe widget output (if any).
+    if [[ -s "$SANDBOX/unit_probe.jsonl" ]]; then
+        mv "$SANDBOX/unit_probe.jsonl" "$TRACES/${OUT_NAME}.probe.jsonl"
+        echo "probe: $TRACES/${OUT_NAME}.probe.jsonl ($(wc -l < "$TRACES/${OUT_NAME}.probe.jsonl") lines)"
+    fi
+    # /DumpState output (if any) — ReplayGameState-*.txt files in write-dir.
+    DUMP_DEST="$TRACES/${OUT_NAME}.dumpstates"
+    mkdir -p "$DUMP_DEST"
+    found_dump=0
+    for dumpf in "$SANDBOX"/ReplayGameState-*.txt "$SANDBOX"/ServerGameState-*.txt; do
+        [[ -e "$dumpf" ]] || continue
+        mv "$dumpf" "$DUMP_DEST/"
+        found_dump=$((found_dump + 1))
+    done
+    if (( found_dump > 0 )); then
+        echo "dumpstates: $DUMP_DEST ($found_dump files)"
+    else
+        rmdir "$DUMP_DEST" 2>/dev/null
     fi
     wc -l "$DEST"
     ls -la "$DEST"

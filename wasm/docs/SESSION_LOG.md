@@ -171,6 +171,80 @@ from actually unlinking streflop.
 Trace match against native re-verified: same 408 common frames, same
 divergence at f=786 unit 12910 dx=-0.2 dz=+0.1.
 
+## 2026-04-25
+
+### Streflop attempt #4 (this time it stuck) + commander-aim divergence hunt
+
+Reversed the conclusion of attempt #3: streflop=ON does help, *a lot*. The
+prior attempt's "streflop ON desyncs at f=420, worse than f=786 OFF" reading
+mixed up two different runs. With ENABLE_STREFLOP=ON + STREFLOP_SSE=ON +
+STREFLOP_AUTO=OFF (CMakeLists already skips the x86 flags on emscripten):
+
+- WASM engine's per-frame sync checksum is **bit-faithful to the demo for
+  frames 0 and 60** (was diverging at f=0 with streflop OFF). First desync
+  pushed from f=0 → **f=120**.
+- Wide per-frame probe of all units across f=0..200 shows positions, headings,
+  velocities, *and* health/build-progress/team-resources are bit-identical
+  native↔WASM through f=200. The remaining divergence lives in non-probed
+  synced state.
+- New `probe_unit_motion.lua` tracks the three commanders that originally
+  diverged — uid 30611 is now bit-identical to native across all 1500 probed
+  frames. uid 12910 still diverges, but at f=784 instead of f=685, and the
+  intervening cs (currentSpeed) ULP drift is gone.
+- Lua's `math.sin/cos/atan2/...` route through `math::*` via lmathlib.cpp,
+  which goes through `streflop_cond.h`. Confirmed by reading
+  `build-wasm/.../lua.dir/flags.make`: `-DSTREFLOP_SSE` is set on lua too.
+
+`/DumpState` at f=60 (clean) and f=120 (first desync) via a new
+`probe_dumpstate.lua` widget reveals the f=120 divergence is exactly:
+
+- One commander unit (uid 30303 corcom) has divergent `aimy1` piece rotation
+  hash, and downstream `weaponDir` / `weaponPos` / `weaponMuzzlePos` for both
+  weapons. Unit base state (xdir, ydir, zdir, pos, speed, heading) is
+  bit-identical between native and WASM at f=120. RNG `genState` matches.
+  Just one piece on one commander.
+
+Tried `-ffp-contract=off` engine-wide (added to `wasm-configure.sh`'s
+`CMAKE_CXX_FLAGS`; verified propagated to engine, lua, streflop targets).
+**No effect** on the f=120 divergence — emcc on wasm32 lacks scalar FMA, so
+fp-contract was already a no-op on our side.
+
+Hypothesis for what remains: animation tick (`TickTurnAnim`/`TickSpinAnim` →
+`ClampRad` / `TurnToward`) for one specific commander script step produces a
+slightly different float in our build vs the upstream BAR `recoil_2025.06.19`
+binary. Could be a compiler-codegen difference (gcc vs emcc-clang), x87 vs
+SSE intermediates, or auto-vectorization choice. We can't prove it without
+building the native engine ourselves from the same source.
+
+Native build attempt: scaffolded `wasm/scripts/native-configure.sh` +
+`native-build.sh` plus a `BAR_USE_STUBS=1` env-gated patch to CMakeLists
+(reuses the WASM DevIL/pr-downloader stubs) so we can build with system
+deps. Hit a wall on RmlUi's `find_package(Freetype)` linkage despite system
+freetype-dev being installed. Deferred — the missing piece for verifying
+source-determinism is making that native build go through.
+
+### Files / infrastructure added
+
+- `wasm/widgets/probe_unit_motion.lua` — companion to state_dump; per-frame
+  full-precision (pos/heading/velocity/dir/cmd/MoveTypeData) for picked
+  uids, plus wide-coverage (all units + team resources + health) for the
+  first 200 frames. Output: `unit_probe.jsonl`.
+- `wasm/widgets/probe_dumpstate.lua` — triggers `/cheat 1` then
+  `/dumpstate <f> <f>` at chosen frames, then `Spring.Quit()` shortly
+  after — keeps test loops to ~2-3 min instead of 10.
+- `wasm/scripts/diff-probe.py` — field-by-field diff of two probe traces,
+  pinpoints first-divergent field per uid.
+- `wasm/scripts/{native-configure,native-build}.sh` — scaffolding for the
+  matching native build.
+- `wasm/scripts/streflop-determinism-test.cpp` — minimal harness that
+  bit-compares streflop's libm + ClampRad outputs across native/WASM
+  builds (left in-progress; overload-resolution issues in standalone
+  harness make it less useful than expected).
+- `capture.sh` / `wasm-run.sh` — install all `wasm/widgets/*.lua`,
+  preserve probe + dumpstate outputs in `traces/<name>.{probe.jsonl,dumpstates/}`,
+  honor `HEADLESS=...` env override (so we can swap in a locally-built
+  native binary).
+
 ### Gotchas logged for future
 
 - `cd && foo & bar & wait` — only the first `&`-backgrounded command
