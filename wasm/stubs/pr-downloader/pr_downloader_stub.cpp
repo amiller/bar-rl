@@ -1,7 +1,10 @@
 // Stub pr-downloader for Emscripten WASM headless Recoil build.
 // Implements the pr-downloader.h public API as no-ops/failures.
 // Replay playback never triggers downloads, so this surface is safe.
-#include "../../../repos/RecoilEngine/tools/pr-downloader/src/pr-downloader.h"
+// Header is found via -I${CMAKE_SOURCE_DIR}/tools/pr-downloader/src set by
+// stubs/pr-downloader/CMakeLists.txt — works for any source tree (HEAD or
+// the 2025.06.19 worktree).
+#include "pr-downloader.h"
 #include <cstdlib>
 #include <cstdio>
 
