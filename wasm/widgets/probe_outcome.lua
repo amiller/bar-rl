@@ -106,6 +106,22 @@ function widget:UnitDestroyed(uid, defId, team, attackerID, attackerDefID, attac
     end
 end
 
+-- Periodic team-summary snapshots so we can plot trajectory divergence
+-- (unit-count curves, resource curves) — winner-match is a coarse metric;
+-- the unfolding-shape matters too.
+local SNAPSHOT_EVERY = 900  -- 30 sim-seconds at 30fps
+
+function widget:GameFrame(f)
+    if not fh then return end
+    if f > 0 and f % SNAPSHOT_EVERY == 0 then
+        local teams = spGetTeamList() or {}
+        local team_strs = {}
+        for i = 1, #teams do team_strs[#team_strs+1] = team_summary(teams[i]) end
+        fh:write(sfmt('{"event":"snapshot","frame":%d,"teams":[%s]}\n',
+            f, table.concat(team_strs, ",")))
+    end
+end
+
 function widget:Shutdown()
     if fh then
         -- One last snapshot at shutdown (in case GameOver didn't fire — quit

@@ -26,6 +26,9 @@ def find_event(records, label):
             return r
     return None
 
+def find_all(records, label):
+    return [r for r in records if r.get("event") == label]
+
 def summarize(rec, label):
     print(f"  {label}:")
     print(f"    event:   {rec.get('event')}")
@@ -57,6 +60,44 @@ def main():
     if b_end is None:
         print("  NO outcome events"); return
     summarize(b_end, "end-of-game")
+
+    # Commander deaths — the actual game-decision moments in BAR
+    a_deaths = find_all(a, "commander_death")
+    b_deaths = find_all(b, "commander_death")
+    if a_deaths or b_deaths:
+        print()
+        print("=== commander deaths ===")
+        for label, deaths in (("native", a_deaths), ("wasm", b_deaths)):
+            print(f"  {label}:")
+            for d in deaths:
+                selfd = " (self-d)" if d.get("selfd") == True else ""
+                print(f"    f={d['frame']:6d} ({d['frame']/30:5.1f}s)  {d['name']} of team {d['team']}{selfd}, killer={d.get('attacker','?')}")
+
+    # Trajectory: per-snapshot per-team unit count, side-by-side
+    a_snaps = find_all(a, "snapshot")
+    b_snaps = find_all(b, "snapshot")
+    if a_snaps and b_snaps:
+        print()
+        print("=== trajectory (every 30s sim) ===")
+        a_by_f = {s["frame"]: s for s in a_snaps}
+        b_by_f = {s["frame"]: s for s in b_snaps}
+        common = sorted(set(a_by_f) & set(b_by_f))
+        # Header
+        all_teams = set()
+        for s in (a_snaps + b_snaps):
+            for t in s.get("teams", []): all_teams.add(t["t"])
+        team_ids = sorted(all_teams)
+        print(f"  {'sim-time':10s}  " + "  ".join(f"team{t:>2d} N→W" for t in team_ids))
+        for f in common:
+            ta = {t["t"]: t for t in a_by_f[f].get("teams", [])}
+            tb = {t["t"]: t for t in b_by_f[f].get("teams", [])}
+            row = []
+            for t in team_ids:
+                na = ta.get(t, {}).get("units", 0)
+                nb = tb.get(t, {}).get("units", 0)
+                marker = "" if na == nb else f" Δ{nb-na:+d}"
+                row.append(f"{na:3d}→{nb:3d}{marker:>5s}")
+            print(f"  {f/30:6.0f}s     " + "  ".join(row))
 
     print()
     print("=== diff ===")
