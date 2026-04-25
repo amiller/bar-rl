@@ -1,0 +1,42 @@
+diff --git a/rts/Sim/Units/Scripts/CobInstance.cpp b/rts/Sim/Units/Scripts/CobInstance.cpp
+index f4028a807..f70c0d494 100644
+--- a/rts/Sim/Units/Scripts/CobInstance.cpp
++++ b/rts/Sim/Units/Scripts/CobInstance.cpp
+@@ -237,7 +237,12 @@ void CCobInstance::WindChanged(float heading, float speed)
+ {
+ 	ZoneScoped;
+ 	Call(COBFN_SetSpeed, int(speed * 3000.0f));
+-	Call(COBFN_SetDirection, short(heading * RAD2TAANG));
++	// PORTABLE-CAST: short(float) is UB when the float is outside short's
++	// range. heading*RAD2TAANG can reach 65536 for headings >= PI; native
++	// x86 wraps modulo 2^16 (gcc), WASM (clang/i32.trunc_sat) returns 0.
++	// Bounce through int (well-defined for any in-range float) and let the
++	// C++20 well-defined int->short wrap-around do the modular reduction.
++	Call(COBFN_SetDirection, short(int(heading * RAD2TAANG)));
+ }
+ 
+ 
+@@ -387,8 +392,9 @@ void CCobInstance::StartBuilding(float heading, float pitch)
+ 	std::array<int, 1 + MAX_COB_ARGS> callinArgs;
+ 
+ 	callinArgs[0] = 2;
+-	callinArgs[1] = short(heading * RAD2TAANG);
+-	callinArgs[2] = short(  pitch * RAD2TAANG);
++	// see WindChanged for the int-bounce rationale (portable wrap-around)
++	callinArgs[1] = short(int(heading * RAD2TAANG));
++	callinArgs[2] = short(int(  pitch * RAD2TAANG));
+ 
+ 	Call(COBFN_StartBuilding, callinArgs);
+ }
+@@ -439,8 +445,9 @@ void CCobInstance::AimWeapon(int weaponNum, float heading, float pitch)
+ 	std::array<int, 1 + MAX_COB_ARGS> callinArgs;
+ 
+ 	callinArgs[0] = 2;
+-	callinArgs[1] = short(heading * RAD2TAANG);
+-	callinArgs[2] = short(  pitch * RAD2TAANG);
++	// see WindChanged for the int-bounce rationale (portable wrap-around)
++	callinArgs[1] = short(int(heading * RAD2TAANG));
++	callinArgs[2] = short(int(  pitch * RAD2TAANG));
+ 
+ 	Call(COBFN_AimPrimary + COBFN_Weapon_Funcs * weaponNum, callinArgs, CBAimWeapon, weaponNum, nullptr);
+ }

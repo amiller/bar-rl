@@ -16,6 +16,31 @@ BUILD="$PROJECT/build-wasm-browser"
 source "$SCRIPT_DIR/wasm-env.sh"
 export BAR_WASM_STUBS="$PROJECT/stubs"
 
+# Apply the same stacked patches as wasm-configure-tag.sh — the browser build
+# uses the same source tree and needs the same fixes (incl. the COB short-cast
+# fix that makes WASM bit-faithful to the demo).
+PATCHES="$PROJECT/patches"
+apply_in() {
+    local dir="$1" patch="$2"
+    if (cd "$dir" && git apply --reverse --check "$patch" 2>/dev/null); then
+        echo "patch already applied: $(basename "$patch")"
+    elif (cd "$dir" && git apply "$patch" 2>/dev/null); then
+        echo "patch applied: $(basename "$patch")"
+    else
+        echo "WARN: could not apply $(basename "$patch") in $dir"
+    fi
+}
+if [[ -d "$PATCHES" ]]; then
+    for p in "$PATCHES"/*.patch; do
+        [[ -e "$p" ]] || continue
+        case "$(basename "$p")" in
+            002-streflop-*) apply_in "$RECOIL/rts/lib/streflop" "$p" ;;
+            003-streflop-*) apply_in "$RECOIL/rts/lib/streflop" "$p" ;;
+            *)              apply_in "$RECOIL" "$p" ;;
+        esac
+    done
+fi
+
 mkdir -p "$BUILD"
 echo "logging to $BUILD/configure.log"
 

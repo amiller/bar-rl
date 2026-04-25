@@ -14,6 +14,31 @@ IMAGE="bar-native-build:gcc13"
 [[ -d "$RECOIL" ]] || { echo "no worktree at $RECOIL"; exit 1; }
 mkdir -p "$BUILD"
 
+# Apply stacked patches against the worktree (host-side, before the docker
+# build sees it). Mirrors wasm-configure-tag.sh so a clean checkout produces
+# a fix-patched binary on first build.
+PATCHES="$PROJECT/patches"
+apply_in() {
+    local dir="$1" patch="$2"
+    if (cd "$dir" && git apply --reverse --check "$patch" 2>/dev/null); then
+        echo "patch already applied: $(basename "$patch")"
+    elif (cd "$dir" && git apply "$patch" 2>/dev/null); then
+        echo "patch applied: $(basename "$patch")"
+    else
+        echo "WARN: could not apply $(basename "$patch") in $dir"
+    fi
+}
+if [[ -d "$PATCHES" ]]; then
+    for p in "$PATCHES"/*.patch; do
+        [[ -e "$p" ]] || continue
+        case "$(basename "$p")" in
+            002-streflop-*) apply_in "$RECOIL/rts/lib/streflop" "$p" ;;
+            003-streflop-*) apply_in "$RECOIL/rts/lib/streflop" "$p" ;;
+            *)              apply_in "$RECOIL" "$p" ;;
+        esac
+    done
+fi
+
 JOBS="${JOBS:-$(nproc)}"
 TARGET="${1:-engine-headless}"
 
