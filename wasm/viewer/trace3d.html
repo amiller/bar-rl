@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BAR replay scrubber — 3D</title>
+<style>
+  html,body { margin:0; padding:0; background:#0a0a0a; color:#ddd;
+              font:13px/1.4 ui-monospace, Menlo, monospace; height:100%; }
+  #wrap { display:grid; grid-template-rows:auto 1fr auto; height:100%; }
+  header { padding:8px 12px; border-bottom:1px solid #222; display:flex; gap:14px; align-items:center; }
+  header input[type=file] { color:#ddd; font:inherit; }
+  #status { color:#889; }
+  #stage { position:relative; overflow:hidden; }
+  #stage canvas { display:block; }
+  footer { padding:8px 12px; border-top:1px solid #222; display:flex; gap:10px; align-items:center; }
+  footer #scrub { flex:1; }
+  footer button { background:#222; color:#ddd; border:1px solid #333; padding:4px 10px; cursor:pointer; border-radius:3px; font:inherit; }
+  footer button:disabled { opacity:0.5; cursor:default; }
+</style>
+</head>
+<body><div id="wrap">
+<header>
+  <strong>BAR 3D scrubber</strong>
+  <select id="traceSel" style="background:#191919;color:#ddd;border:1px solid #333;padding:2px 6px;border-radius:3px;font:inherit"></select>
+  <input type="file" id="trace" accept=".jsonl" style="display:none">
+  <button id="filePick" style="background:#222;color:#ddd;border:1px solid #333;padding:2px 8px;border-radius:3px;font:inherit;cursor:pointer">file…</button>
+  <span id="status">loading…</span>
+</header>
+<div id="stage"></div>
+<footer>
+  <button id="play">▶</button>
+  <input type="range" id="scrub" min="0" max="0" step="1" value="0" disabled>
+  <span id="frameLabel">f=–</span>
+</footer>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://esm.sh/three@0.159.0",
+  "three/addons/": "https://esm.sh/three@0.159.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MapControls } from 'three/addons/controls/MapControls.js';
+
+const GLB = name => `https://cdn.jsdelivr.net/gh/icexuick/BAR-modelviewer@main/glb/${name}.glb`;
+
+// BAR's eight team colors, roughly (looked at icontypes.lua eyeballed).
+const TEAM_COLORS = [
+  0x4a90ff, 0xff4040, 0x4ed070, 0xffe400,
+  0xb060ff, 0x40d0d0, 0xff8000, 0xc0c0c0,
+];
+
+// ---- scene ----
+const stage = document.getElementById('stage');
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0a0a0a);
+const cam   = new THREE.PerspectiveCamera(45, 1, 1, 50000);
+cam.position.set(2048, 1500, 4500); cam.lookAt(2048, 0, 2048);
+const r = new THREE.WebGLRenderer({ antialias: true });
+r.setPixelRatio(devicePixelRatio); stage.appendChild(r.domElement);
+// MapControls = pan-drag + scroll-zoom-toward-cursor + right-button orbit;
+// the right feel for a top-down RTS map. zoomToCursor is the single most
+// important UX upgrade vs. plain OrbitControls.
+const ctrl = new MapControls(cam, r.domElement);
+ctrl.target.set(2048, 0, 2048);
+ctrl.enableDamping = true; ctrl.dampingFactor = 0.12;
+ctrl.zoomToCursor = true; ctrl.zoomSpeed = 1.6;
+ctrl.maxPolarAngle = Math.PI * 0.49;   // never tilt below the ground
+ctrl.minDistance = 80; ctrl.maxDistance = 12000;
+
+scene.add(new THREE.HemisphereLight(0xbcd3ff, 0x282318, 0.55));
+const sun = new THREE.DirectionalLight(0xffeed0, 1.4);  // warmer, stronger
+sun.position.set(3000, 4500, 1500); scene.add(sun);
+
+// Ground plane sized to the map (defaults to 4096; updated from meta).
+// Texture is fetched from api.bar-rts.com on map-name resolve; falls back to
+// dark grey if the request 404s.
+let mapX = 4096, mapZ = 4096;
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a1f1a, roughness: 1.0 });
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(mapX, mapZ), groundMat);
+ground.rotation.x = -Math.PI/2; ground.position.set(mapX/2, 0, mapZ/2); scene.add(ground);
+
+const texLoader = new THREE.TextureLoader();
+texLoader.crossOrigin = 'anonymous';
+function setMapTexture(scriptName) {
+  if (!scriptName) return;
+  // BAR's API expects lowercase + spaces→underscores: "Great Divide V1" → great_divide_v1
+  const file = scriptName.toLowerCase().replace(/\s+/g, '_');
+  const url  = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}/texture-mq.jpg`;
+  texLoader.load(url, tex => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    // Map textures from BAR are oriented with +Z = south; PlaneGeometry's UVs
+    // run with Y-flip after rotation. Flipping Y here matches what you'd see
+    // in-game (north of map = "back" of screen at default angle).
+    tex.flipY = false;
+    groundMat.map = tex; groundMat.color.setHex(0xffffff); groundMat.needsUpdate = true;
+  }, undefined, () => console.warn('no map tex for', scriptName, url));
+}
+
+function fitMap(x, z) {
+  mapX = x; mapZ = z;
+  ground.geometry.dispose();
+  ground.geometry = new THREE.PlaneGeometry(mapX, mapZ);
+  ground.position.set(mapX/2, 0, mapZ/2);
+  // Camera default: 60° down (instead of nearly horizontal), closer.
+  // Eye at (mapX/2, h, mapZ/2 + h*0.5) where h is sized to fit the map.
+  const span = Math.max(mapX, mapZ);
+  const h = span * 0.65;
+  cam.position.set(mapX/2, h, mapZ/2 + h * 0.45);
+  ctrl.target.set(mapX/2, 0, mapZ/2);
+  ctrl.maxDistance = span * 1.5;
+  ctrl.update();
+}
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  r.setSize(w, h, false);
+  cam.aspect = w / h; cam.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+// ---- model cache ----
+// One Object3D template per unit-def-name. Lazy fetched on first use.
+const loader = new GLTFLoader();
+const protoCache = new Map();      // defName -> Promise<Object3D>
+const fallback = (radius) => {
+  const m = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius || 12, radius || 12, 8, 12),
+    new THREE.MeshStandardMaterial({ color: 0x666666 }));
+  m.position.y = 4;
+  return m;
+};
+function getProto(defName, radius) {
+  if (!protoCache.has(defName)) {
+    protoCache.set(defName, fetch(GLB(defName)).then(rsp => {
+      if (!rsp.ok) throw new Error(`HTTP ${rsp.status} for ${defName}`);
+      return rsp.arrayBuffer();
+    }).then(buf => new Promise((res, rej) =>
+      loader.parse(buf, '', g => res(g.scene), rej)
+    )).catch(e => { console.warn(`fallback for ${defName}:`, e.message); return fallback(radius); }));
+  }
+  return protoCache.get(defName);
+}
+
+// ---- trace ----
+let meta = null;          // { defs: { id -> {n, r} } }
+let frames = [];          // [ { f, u: [[uid,team,def,x,z,hp], ...] } ]
+const liveByUid = new Map();   // uid -> Object3D (cloned proto, in scene)
+
+async function loadTraceFromText(text, label) {
+  const lines = text.split('\n').filter(Boolean);
+  meta = null; frames = []; liveByUid.forEach(o => scene.remove(o)); liveByUid.clear();
+  for (const ln of lines) {
+    let r; try { r = JSON.parse(ln); } catch { continue; }
+    if (r.t === 'meta') {
+      meta = r;
+      fitMap(r.mapX || 4096, r.mapZ || 4096);
+      setMapTexture(r.mapName);
+    }
+    else if (r.t === 'f') frames.push(r);
+  }
+  document.getElementById('status').textContent =
+    `${label} — ${frames.length} frames, ${Object.keys(meta?.defs||{}).length} defs`;
+  const sc = document.getElementById('scrub');
+  sc.max = String(frames.length - 1); sc.value = '0'; sc.disabled = false;
+  applyFrame(0);
+}
+async function loadTraceUrl(name) {
+  const rsp = await fetch('/traces/' + encodeURIComponent(name));
+  if (!rsp.ok) { document.getElementById('status').textContent = `HTTP ${rsp.status} loading ${name}`; return; }
+  await loadTraceFromText(await rsp.text(), name);
+}
+async function populateDropdown() {
+  let traces = [];
+  try {
+    const j = await (await fetch('/api/traces')).json();
+    // Keep only the per-frame trace files (have a mapName + lastFrame).
+    traces = (j.traces || []).filter(t => t.mapName && t.lastFrame > 0);
+    // Default to the longest (most-frames) trace — much more interesting than
+    // a 30-second probe.
+    traces.sort((a, b) => b.lastFrame - a.lastFrame);
+  } catch (_) {}
+  const sel = document.getElementById('traceSel');
+  sel.innerHTML = '';
+  if (!traces.length) {
+    sel.innerHTML = '<option>(no /api/traces — use file…)</option>';
+    document.getElementById('status').textContent = 'no traces; use file…';
+    return null;
+  }
+  for (const t of traces) {
+    const opt = document.createElement('option');
+    opt.value = t.name;
+    opt.textContent = `${t.mapName} · ${t.lastFrame}f · ${(t.size/1e6).toFixed(1)}MB`;
+    sel.appendChild(opt);
+  }
+  // Optional ?trace=<name> URL override (handy for screenshots / sharing).
+  const qp = new URLSearchParams(location.search).get('trace');
+  if (qp && traces.some(t => t.name === qp)) sel.value = qp;
+  return sel.value;
+}
+document.getElementById('traceSel').addEventListener('change', e => loadTraceUrl(e.target.value));
+document.getElementById('filePick').addEventListener('click', () => document.getElementById('trace').click());
+document.getElementById('trace').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (f) await loadTraceFromText(await f.text(), f.name);
+});
+// auto-load on page-ready
+const initial = await populateDropdown();
+if (initial) await loadTraceUrl(initial);
+
+// ---- frame application ----
+async function applyFrame(idx) {
+  const fr = frames[idx]; if (!fr) return;
+  document.getElementById('frameLabel').textContent = `f=${fr.f}`;
+  const seen = new Set();
+  for (const u of (fr.u || [])) {
+    // Trace formats:
+    //   v1 (6 fields): [uid, team, def, x, z, hp]
+    //   v2 (8 fields): [..., y, heading_short]   (heading is signed 16-bit
+    //                  TA-angle; *(pi/32768) → radians)
+    const [uid, team, defId, x, z, _hp, y, heading] = u;
+    seen.add(uid);
+    let obj = liveByUid.get(uid);
+    if (!obj) {
+      const def = meta.defs[String(defId)];
+      if (!def) continue;
+      const proto = await getProto(def.n, def.r);
+      obj = new THREE.Group();
+      obj.add(proto.clone(true));      // model (textures preserved!)
+      // Team-colored disk on the ground beneath the unit — radius = def.r.
+      // Avoids destroying the model's diffuse texture for the sake of team
+      // identification. Z-fight prevented by lifting 0.5u above ground.
+      const ringGeom = new THREE.CircleGeometry(Math.max(def.r * 1.1, 8), 24);
+      const ringMat  = new THREE.MeshBasicMaterial({
+        color: TEAM_COLORS[team % TEAM_COLORS.length],
+        transparent: true, opacity: 0.55, depthWrite: false,
+      });
+      const ring = new THREE.Mesh(ringGeom, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.5;
+      obj.add(ring);
+      scene.add(obj);
+      liveByUid.set(uid, obj);
+    }
+    obj.position.set(x, y || 0, z);
+    if (heading !== undefined) obj.rotation.y = heading * Math.PI / 32768;
+  }
+  // Remove units no longer present
+  for (const [uid, obj] of liveByUid) {
+    if (!seen.has(uid)) { scene.remove(obj); liveByUid.delete(uid); }
+  }
+}
+
+document.getElementById('scrub').addEventListener('input', e =>
+  applyFrame(+e.target.value));
+
+// ---- play ----
+let playing = false; let playT = 0;
+const playBtn = document.getElementById('play');
+playBtn.addEventListener('click', () => {
+  playing = !playing; playBtn.textContent = playing ? '⏸' : '▶';
+});
+
+// ---- render loop ----
+function tick(now) {
+  if (playing && frames.length) {
+    if (!playT) playT = now;
+    const dt = (now - playT) / 1000;
+    if (dt > 1/30) {  // 30 frames/sec scrubbing
+      const sc = document.getElementById('scrub');
+      const next = (+sc.value + 1) % frames.length;
+      sc.value = String(next); applyFrame(next);
+      playT = now;
+    }
+  } else playT = 0;
+  ctrl.update(); r.render(scene, cam); requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body></html>

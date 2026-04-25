@@ -22,6 +22,7 @@ local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitTeam     = Spring.GetUnitTeam
 local spGetUnitHealth   = Spring.GetUnitHealth
 local spGetUnitDefID    = Spring.GetUnitDefID
+local spGetUnitHeading  = Spring.GetUnitHeading
 local sfmt              = string.format
 local tconcat           = table.concat
 
@@ -86,12 +87,15 @@ function widget:GameFrame(f)
     local parts = {}
     for i = 1, #units do
         local uid = units[i]
-        local x, _, z = spGetUnitPosition(uid)
+        local x, y, z = spGetUnitPosition(uid)
         if x then
             local hp, maxHp = spGetUnitHealth(uid)
             local pct = (hp and maxHp and maxHp > 0) and math.floor(hp / maxHp * 100) or 0
-            parts[#parts+1] = sfmt("[%d,%d,%d,%.1f,%.1f,%d]",
-                uid, spGetUnitTeam(uid) or -1, spGetUnitDefID(uid) or 0, x, z, pct)
+            -- 7th = terrain-y so 3D viewers can lift the model off the plane.
+            -- 8th = heading (signed short, -32768..32767, *(pi/32768) = radians).
+            parts[#parts+1] = sfmt("[%d,%d,%d,%.1f,%.1f,%d,%.1f,%d]",
+                uid, spGetUnitTeam(uid) or -1, spGetUnitDefID(uid) or 0,
+                x, z, pct, y or 0, spGetUnitHeading(uid) or 0)
         end
     end
     w(sfmt('{"t":"f","f":%d,"u":[%s]}', f, tconcat(parts, ",")))
