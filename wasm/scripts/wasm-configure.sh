@@ -33,6 +33,7 @@ if [[ -d "$PATCHES" ]]; then
         [[ -e "$p" ]] || continue
         case "$(basename "$p")" in
             002-streflop-*) apply_in "$RECOIL/rts/lib/streflop" "$p" ;;
+            003-streflop-*) apply_in "$RECOIL/rts/lib/streflop" "$p" ;;
             *)              apply_in "$RECOIL" "$p" ;;
         esac
     done

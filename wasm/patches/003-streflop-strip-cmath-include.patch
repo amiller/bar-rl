@@ -1,0 +1,17 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,6 +5,13 @@ project(streflop C CXX)
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ 
++# Strip parent's `-include cmath` / `-include cstdlib` from the flags streflop
++# inherits — emcc's <math.h> declares `sincos` / `NAN` / etc. which collide
++# with streflop's libm sources that use those names as variables/macros.
++# Engine code still benefits from the parent's `-include cmath`.
++string(REPLACE "-include cmath"   "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
++string(REPLACE "-include cstdlib" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
++
+ # Options
+ option(STREFLOP_AUTO "Autodetect the most appropriate Streflop implementation" ON)
+ option(STREFLOP_SSE "Use SSE instead of x87 extended precision" OFF)
