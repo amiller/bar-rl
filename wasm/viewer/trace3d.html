@@ -70,9 +70,20 @@ ctrl.zoomToCursor = true; ctrl.zoomSpeed = 1.6;
 ctrl.maxPolarAngle = Math.PI * 0.49;   // never tilt below the ground
 ctrl.minDistance = 80; ctrl.maxDistance = 12000;
 
-scene.add(new THREE.HemisphereLight(0xbcd3ff, 0x282318, 0.55));
-const sun = new THREE.DirectionalLight(0xffeed0, 1.4);  // warmer, stronger
+scene.add(new THREE.HemisphereLight(0xbcd3ff, 0x4a4032, 0.85));
+const sun = new THREE.DirectionalLight(0xffeed0, 1.8);
 sun.position.set(3000, 4500, 1500); scene.add(sun);
+// Brighter ambient overall so the texture-mq.jpg map reads at default zoom.
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+
+// Make units render at a multiple of native size — BAR units are sized for
+// in-engine zoom, but in our top-down scrubber view at the full-map scale
+// they're invisible specks. Boost so they read at the default zoom.
+const UNIT_SCALE = 4;
+// Lift the map plane just enough that units (lifted slightly themselves)
+// stop intersecting it. We don't yet have a heightmap, so units sit flat at
+// y = 0 regardless of trace y value.
+const UNITS_FLAT = true;
 
 // Ground plane sized to the map (defaults to 4096; updated from meta).
 // Texture is fetched from api.bar-rts.com on map-name resolve; falls back to
@@ -227,23 +238,25 @@ async function applyFrame(idx) {
       if (!def) continue;
       const proto = await getProto(def.n, def.r);
       obj = new THREE.Group();
-      obj.add(proto.clone(true));      // model (textures preserved!)
-      // Team-colored disk on the ground beneath the unit — radius = def.r.
-      // Avoids destroying the model's diffuse texture for the sake of team
-      // identification. Z-fight prevented by lifting 0.5u above ground.
-      const ringGeom = new THREE.CircleGeometry(Math.max(def.r * 1.1, 8), 24);
+      const model = proto.clone(true);
+      model.scale.setScalar(UNIT_SCALE);          // make units actually visible
+      obj.add(model);
+      // Team-colored disk on the ground beneath the unit — radius scales
+      // along with the model so it stays in proportion.
+      const r = Math.max(def.r * UNIT_SCALE * 1.05, 8 * UNIT_SCALE);
+      const ringGeom = new THREE.CircleGeometry(r, 24);
       const ringMat  = new THREE.MeshBasicMaterial({
         color: TEAM_COLORS[team % TEAM_COLORS.length],
-        transparent: true, opacity: 0.55, depthWrite: false,
+        transparent: true, opacity: 0.7, depthWrite: false,
       });
       const ring = new THREE.Mesh(ringGeom, ringMat);
       ring.rotation.x = -Math.PI / 2;
-      ring.position.y = 0.5;
+      ring.position.y = 1.0;
       obj.add(ring);
       scene.add(obj);
       liveByUid.set(uid, obj);
     }
-    obj.position.set(x, y || 0, z);
+    obj.position.set(x, UNITS_FLAT ? 0 : (y || 0), z);
     if (heading !== undefined) obj.rotation.y = heading * Math.PI / 32768;
   }
   // Remove units no longer present
