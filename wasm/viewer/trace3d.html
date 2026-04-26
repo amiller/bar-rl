@@ -65,8 +65,11 @@ r.setPixelRatio(devicePixelRatio); stage.appendChild(r.domElement);
 // important UX upgrade vs. plain OrbitControls.
 const ctrl = new MapControls(cam, r.domElement);
 ctrl.target.set(2048, 0, 2048);
-ctrl.enableDamping = true; ctrl.dampingFactor = 0.12;
-ctrl.zoomToCursor = true; ctrl.zoomSpeed = 1.6;
+ctrl.enableDamping = true; ctrl.dampingFactor = 0.18;  // snappier
+ctrl.zoomToCursor = true;
+ctrl.zoomSpeed   = 3.5;     // was 1.6 — felt slow
+ctrl.panSpeed    = 2.4;     // was default 1.0
+ctrl.rotateSpeed = 1.2;     // right-button orbit
 ctrl.maxPolarAngle = Math.PI * 0.49;   // never tilt below the ground
 ctrl.minDistance = 80; ctrl.maxDistance = 12000;
 
@@ -94,7 +97,7 @@ const GROUND_WIRE  =  (QP.get('wireframe')   ?? '0') === '1';
 let mapX = 4096, mapZ = 4096;
 const GROUND_SEGS = 256;
 const groundMat = new THREE.MeshStandardMaterial({
-  color: 0x1a1f1a, roughness: 1.0, flatShading: true,
+  color: 0x808080, roughness: 0.85,
   displacementScale: HEIGHT_SCALE, displacementBias: 0,
   wireframe: GROUND_WIRE,
 });
@@ -109,11 +112,18 @@ function setMapTexture(scriptName) {
   // BAR's API expects lowercase + spaces→underscores: "Great Divide V1" → great_divide_v1
   const file = scriptName.toLowerCase().replace(/\s+/g, '_');
   const baseUrl = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}`;
-  // Color: texture-mq.jpg (medium quality, ~1MB)
-  texLoader.load(`${baseUrl}/texture-mq.jpg`, tex => {
+  // Color: texture-hq.jpg (high quality — much crisper than -mq when zoomed in)
+  texLoader.load(`${baseUrl}/texture-hq.jpg`, tex => {
     tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false;
+    tex.anisotropy = r.capabilities.getMaxAnisotropy();   // crisp at glancing angles
     groundMat.map = tex; groundMat.color.setHex(0xffffff); groundMat.needsUpdate = true;
-  }, undefined, () => console.warn('no texture-mq for', scriptName));
+  }, undefined, () => {
+    console.warn('no texture-hq for', scriptName, '— falling back to mq');
+    texLoader.load(`${baseUrl}/texture-mq.jpg`, tex => {
+      tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false;
+      groundMat.map = tex; groundMat.color.setHex(0xffffff); groundMat.needsUpdate = true;
+    });
+  });
   // Displacement: height.png. Three.js doesn't recompute vertex normals after
   // displacementMap moves them, so without a NORMAL MAP the surface still
   // shades as if it were flat — light reflects identically across the whole
