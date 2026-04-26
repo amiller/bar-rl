@@ -190,10 +190,18 @@ function heightmapToNormalMap(bm, strength) {
   return dst;
 }
 
+// debug exposure (used by probe-mat.mjs)
+window.__scene  = scene;
+window.__cam    = cam;
+window.__ground = ground;
+window.__groundMat = groundMat;
+
 function fitMap(x, z) {
   mapX = x; mapZ = z;
   ground.geometry.dispose();
-  ground.geometry = new THREE.PlaneGeometry(mapX, mapZ);
+  // KEEP the segment count — without it the plane has 4 verts and the
+  // displacementMap has nothing to push, so terrain stays dead flat.
+  ground.geometry = new THREE.PlaneGeometry(mapX, mapZ, GROUND_SEGS, GROUND_SEGS);
   ground.position.set(mapX/2, 0, mapZ/2);
   // Camera default: 60° down (instead of nearly horizontal), closer.
   // Eye at (mapX/2, h, mapZ/2 + h*0.5) where h is sized to fit the map.
