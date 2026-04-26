@@ -85,10 +85,25 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 //   ?flat=1          — pin units to y=0 (skip terrain elevation from trace)
 //   ?wireframe=1     — wireframe on the ground (debug; shows displacement)
 const QP = new URLSearchParams(location.search);
-const UNIT_SCALE   = +(QP.get('unitScale')   ?? 1.0);
+const UNIT_SCALE   = +(QP.get('unitScale')   ?? 0.7);
 const HEIGHT_SCALE_OVERRIDE = QP.has('heightScale') ? +QP.get('heightScale') : null;
 const UNITS_FLAT   =  (QP.get('flat')        ?? '0') === '1';
 const GROUND_WIRE  =  (QP.get('wireframe')   ?? '0') === '1';
+
+let heightmap = null;   // { w, h, data } — for JS-side terrain sampling
+
+function sampleTerrainY(x, z) {
+  if (!heightmap) return 0;
+  // World (x,z) ∈ [0..mapX, 0..mapZ] → heightmap pixel coords.
+  // dispTex has flipY=true, which mirrors the V axis at upload — so to match
+  // what the GPU samples, we read the image with z FLIPPED (1 - z/mapZ).
+  const u = x / mapX;
+  const v = 1 - z / mapZ;
+  const cx = Math.max(0, Math.min(heightmap.w - 1, (u * heightmap.w) | 0));
+  const cy = Math.max(0, Math.min(heightmap.h - 1, (v * heightmap.h) | 0));
+  const luma = heightmap.data[(cy * heightmap.w + cx) * 4];   // R channel
+  return (luma / 255) * groundMat.displacementScale + groundMat.displacementBias;
+}
 
 // Ground plane sized to the map (defaults to 4096; updated from meta).
 // Match the heightmap resolution (BAR ships height.png at ~513×513 for an
@@ -154,6 +169,12 @@ function setMapTexture(scriptName) {
     const dispTex = new THREE.CanvasTexture(bitmapToCanvas(bm));
     dispTex.flipY = true;
     groundMat.displacementMap = dispTex;
+    // Stash the raw heightmap pixels so we can sample the terrain on the JS
+    // side and pin units to it (regardless of whether trace y matches our
+    // displacement math). See sampleTerrainY().
+    const c = bitmapToCanvas(bm);
+    const px = c.getContext('2d').getImageData(0, 0, bm.width, bm.height);
+    heightmap = { w: bm.width, h: bm.height, data: px.data };
     // Normal map: sobel-derive per-pixel slope from the heightmap pixels.
     // Strength controls how exaggerated the bumps look in light reflection.
     const normCanvas = heightmapToNormalMap(bm, /*strength=*/ groundMat.displacementScale / 64);
@@ -487,7 +508,13 @@ async function applyFrame(idx) {
       scene.add(obj);
       liveByUid.set(uid, obj);
     }
-    obj.position.set(x, UNITS_FLAT ? 0 : (y || 0), z);
+    // Pin to the *rendered* terrain height (sampled from heightmap on the
+    // JS side using the same displacementScale/Bias the GPU uses). Falls
+    // back to trace y if heightmap not yet loaded; UNITS_FLAT=1 forces y=0.
+    const yPin = UNITS_FLAT ? 0
+               : heightmap ? sampleTerrainY(x, z)
+                           : (y || 0);
+    obj.position.set(x, yPin, z);
     if (heading !== undefined) obj.rotation.y = heading * Math.PI / 32768;
   }
   // Remove units no longer present
