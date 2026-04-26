@@ -8,3 +8,4 @@ tools/
 traces/*.jsonl
 traces/*.infolog.gz
 traces/*.dumpstates/
+diag-shots/

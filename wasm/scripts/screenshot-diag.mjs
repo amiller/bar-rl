@@ -1,16 +1,21 @@
-// Diagnostic screenshot suite — takes multiple shots at different camera
-// angles + distances so the viewer dev can spot floating/clipping/scale
-// issues that aren't visible from a single angle.
+// Diagnostic screenshot suite — takes shots from many camera angles + a
+// few unit close-ups, then writes an index.html so the developer can
+// click through the gallery.
 //
-// Usage:  node screenshot-diag.mjs [trace-name] [out-dir]
-// Each shot uses window.__cam directly (set by trace3d.html for debug),
-// so the camera is exactly where I expect it to be — no orbit/drag tricks.
+// Usage: node screenshot-diag.mjs [trace-name]
+// Output: wasm/diag-shots/  (served by serve.py, so visit
+//   http://localhost:8765/diag-shots/ to view the gallery)
 import { chromium } from 'playwright';
-import { mkdirSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
+import { join, resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
 const TRACE = process.argv[2] ||
   '2026-04-25_23-00-48-149_Faster Than Light 1.1_2025.06.19-wasm-2025.06.19.jsonl';
-const OUT   = process.argv[3] || '/tmp/trace3d-shots-diag';
+// Output dir: wasm/diag-shots/ — passed in via env or hard-coded path so
+// it works regardless of where the script is invoked from.
+const OUT = process.env.DIAG_OUT_DIR ||
+            '/home/amiller/projects/bar/wasm/diag-shots';
 mkdirSync(OUT, { recursive: true });
 
 const browser = await chromium.launch({ headless: true });
@@ -23,7 +28,7 @@ await page.goto(`http://localhost:8765/viewer/trace3d.html?trace=${encodeURIComp
                 { waitUntil: 'networkidle' });
 await page.waitForFunction(() => /[ — ]\d+ frames/.test(
   document.getElementById('status')?.textContent || ''));
-await page.waitForTimeout(8000);   // let textures + GLBs settle
+await page.waitForTimeout(8000);
 
 // Pick a busy mid-late game frame
 const frameTotal = +(await page.getAttribute('#scrub', 'max'));
@@ -35,61 +40,123 @@ await page.evaluate((f) => {
 }, targetFrame);
 await page.waitForTimeout(4000);
 
-// Find a unit cluster center: poll the live scene for unit positions
-const cluster = await page.evaluate(() => {
-  const positions = [];
-  window.__scene.traverse(o => {
-    if (o.type === 'Group' && o.position.x !== 0 && o.children?.length) {
-      // unit groups have at least the model + a ring as children
-      positions.push([o.position.x, o.position.y, o.position.z]);
-    }
-  });
-  if (!positions.length) return null;
-  // Median position is a reasonable cluster center
-  const cx = positions.map(p => p[0]).sort((a,b)=>a-b)[positions.length>>1];
-  const cy = positions.map(p => p[1]).sort((a,b)=>a-b)[positions.length>>1];
-  const cz = positions.map(p => p[2]).sort((a,b)=>a-b)[positions.length>>1];
-  return { x: cx, y: cy, z: cz, n: positions.length };
-});
-console.log('cluster:', JSON.stringify(cluster));
-
+// Grab map dimensions and a unit cluster
 const map = await page.evaluate(() => ({
   x: window.__ground.geometry.parameters.width,
   z: window.__ground.geometry.parameters.height,
-  dispScale: window.__groundMat.displacementScale,
-  dispBias:  window.__groundMat.displacementBias,
 }));
-console.log('map:', JSON.stringify(map));
+const units = await page.evaluate(() => {
+  const u = [];
+  window.__scene.traverse(o => {
+    if (o.type === 'Group' && o.position.x !== 0 && o.children?.length >= 2) {
+      u.push({ x: o.position.x, y: o.position.y, z: o.position.z });
+    }
+  });
+  return u;
+});
+console.log(`map=${map.x}×${map.z}, units=${units.length}, frame=${targetFrame}/${frameTotal}`);
 
-const cx = map.x / 2, cz = map.z / 2;
-const span = Math.max(map.x, map.z);
+// Cluster center = median position
+function median(arr) { const s = [...arr].sort((a,b)=>a-b); return s[s.length>>1]; }
+const cluster = units.length
+  ? { x: median(units.map(u=>u.x)), y: median(units.map(u=>u.y)), z: median(units.map(u=>u.z)) }
+  : { x: map.x/2, y: 0, z: map.z/2 };
 
-// Camera presets — fixed locations relative to map size + cluster
+const cx = map.x/2, cz = map.z/2, span = Math.max(map.x, map.z);
 const shots = [
-  // Pure top-down full map
-  { name: '01_topdown_full',  pos: [cx, span,         cz + 1],            look: [cx, 0, cz] },
-  // Top-down zoomed in on unit cluster
-  { name: '02_topdown_close', pos: [cluster?.x ?? cx, 1500, (cluster?.z ?? cz) + 1], look: [cluster?.x ?? cx, 0, cluster?.z ?? cz] },
-  // Standard isometric (45°)
-  { name: '03_iso',           pos: [cx + span*0.4, span*0.7, cz + span*0.4], look: [cx, 0, cz] },
-  // Low oblique on cluster
-  { name: '04_low_oblique',   pos: [(cluster?.x ?? cx) + 800, 400, (cluster?.z ?? cz) + 1500], look: [cluster?.x ?? cx, (cluster?.y ?? 0), cluster?.z ?? cz] },
-  // Profile: side-on, low — best to spot floating units against terrain horizon
-  { name: '05_profile',       pos: [cx, 200, cz + span*0.8], look: [cx, 200, cz] },
-  // Tight close-up on cluster — see if individual units sit on terrain
-  { name: '06_tight',         pos: [(cluster?.x ?? cx) + 250, 180, (cluster?.z ?? cz) + 350], look: [cluster?.x ?? cx, (cluster?.y ?? 0), cluster?.z ?? cz] },
+  { name: 'top_full',     caption: 'Top-down, full map',
+    pos: [cx, span, cz + 1], look: [cx, 0, cz] },
+  { name: 'top_close',    caption: 'Top-down, zoomed on unit cluster',
+    pos: [cluster.x, 1500, cluster.z + 1], look: [cluster.x, 0, cluster.z] },
+  { name: 'iso_45',       caption: 'Isometric (~45°), full map',
+    pos: [cx + span*0.4, span*0.7, cz + span*0.4], look: [cx, 0, cz] },
+  { name: 'iso_60_close', caption: '60° from above, on cluster',
+    pos: [cluster.x + 600, 1000, cluster.z + 1000], look: [cluster.x, cluster.y, cluster.z] },
+  { name: 'low_oblique',  caption: 'Low oblique, on cluster',
+    pos: [cluster.x + 500, 350, cluster.z + 1200], look: [cluster.x, cluster.y, cluster.z] },
+  { name: 'profile',      caption: 'Profile (low side-on), to spot floating',
+    pos: [cx, 200, cz + span*0.8], look: [cx, 200, cz] },
+  { name: 'profile_close',caption: 'Profile, zoomed near cluster',
+    pos: [cluster.x - 800, cluster.y + 50, cluster.z + 200], look: [cluster.x, cluster.y, cluster.z] },
 ];
 
+// Per-unit close-ups for the first N units (where they're varied enough)
+const sample = units.slice(0, Math.min(4, units.length));
+for (let i = 0; i < sample.length; i++) {
+  shots.push({
+    name: `unit_${i}`,
+    caption: `Close-up unit ${i} at (${sample[i].x.toFixed(0)}, ${sample[i].z.toFixed(0)})`,
+    pos: [sample[i].x + 80, sample[i].y + 60, sample[i].z + 200],
+    look: [sample[i].x, sample[i].y + 10, sample[i].z],
+  });
+}
+
+const taken = [];
 for (const s of shots) {
   await page.evaluate(({ pos, look }) => {
     window.__cam.position.set(...pos);
     window.__cam.lookAt(...look);
   }, s);
   await page.waitForTimeout(250);
-  const out = `${OUT}/${s.name}.png`;
-  await page.screenshot({ path: out });
-  console.log(`shot: ${out}  pos=(${s.pos.map(n => n.toFixed(0)).join(',')})  look=(${s.look.map(n => n.toFixed(0)).join(',')})`);
+  const file = `${s.name}.png`;
+  await page.screenshot({ path: join(OUT, file) });
+  taken.push({ ...s, file });
+  console.log(`shot: ${file}  ${s.caption}`);
 }
-
 await browser.close();
-console.log('done');
+
+// --- Build index.html ---
+const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BAR viewer diagnostics — ${new Date().toLocaleString()}</title>
+<style>
+  body { background:#111; color:#ddd; font:14px/1.5 ui-monospace, Menlo, monospace;
+         margin:20px; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  .meta { color:#889; font-size:12px; margin-bottom:18px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr));
+          gap:18px; }
+  .card { background:#181818; border:1px solid #333; border-radius:6px; overflow:hidden;
+          cursor:pointer; }
+  .card img { width:100%; display:block; }
+  .card .cap { padding:8px 12px; color:#bbb; font-size:12px; border-top:1px solid #2a2a2a;
+               background:#1c1c1c; }
+  .card .cap .name { color:#88c0ff; }
+  .card:hover { border-color:#4a90ff; }
+  /* simple lightbox */
+  #box { position:fixed; inset:0; background:rgba(0,0,0,.9); display:none;
+         align-items:center; justify-content:center; z-index:99; cursor:zoom-out; }
+  #box img { max-width:96vw; max-height:96vh; }
+  #box.on { display:flex; }
+</style>
+</head>
+<body>
+<h1>BAR 3D viewer — diagnostic gallery</h1>
+<div class="meta">
+  trace: ${TRACE}<br>
+  frame: ${targetFrame} / ${frameTotal} (${(targetFrame/frameTotal*100).toFixed(0)}%)
+  &middot; map: ${map.x}×${map.z} &middot; units in scene: ${units.length}
+  &middot; cluster center: (${cluster.x.toFixed(0)}, ${cluster.z.toFixed(0)})
+  &middot; generated ${new Date().toISOString()}
+</div>
+<div class="grid">
+${taken.map(s => `  <div class="card" data-img="${s.file}">
+    <img src="${s.file}" loading="lazy">
+    <div class="cap"><span class="name">${s.name}</span> &mdash; ${s.caption}<br>
+      pos=(${s.pos.map(n => Math.round(n)).join(', ')}) look=(${s.look.map(n => Math.round(n)).join(', ')})
+    </div>
+  </div>`).join('\n')}
+</div>
+<div id="box"><img></div>
+<script>
+const box = document.getElementById('box'), boxImg = box.querySelector('img');
+document.querySelectorAll('.card').forEach(c => c.addEventListener('click', () => {
+  boxImg.src = c.dataset.img; box.classList.add('on');
+}));
+box.addEventListener('click', () => box.classList.remove('on'));
+</script>
+</body></html>`;
+writeFileSync(join(OUT, 'index.html'), html);
+console.log(`gallery: http://localhost:8765/diag-shots/`);
