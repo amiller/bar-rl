@@ -201,6 +201,34 @@ function resize() {
 }
 addEventListener('resize', resize); resize();
 
+// ---- texture set per faction ----
+// The icexuick GLBs are geometry-only; texture atlases live in the same
+// repo's tex/ directory, named <faction>_{color,normal,other,team}.png.
+// Mesh UVs already map into these atlases — just load them once per faction
+// and assign to material.map / .normalMap / etc.
+const TEX_BASE = 'https://cdn.jsdelivr.net/gh/icexuick/BAR-modelviewer@main/tex';
+const factionTexCache = new Map();   // 'arm' -> Promise<{ color, normal, other, team }>
+function getFactionTextures(faction) {
+  if (!factionTexCache.has(faction)) {
+    const load = (name, srgb=false) => new Promise((res, rej) => {
+      texLoader.load(`${TEX_BASE}/${faction}_${name}.png`, t => {
+        if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+        t.flipY = false;       // GLB UVs are GL-style
+        res(t);
+      }, undefined, rej);
+    });
+    factionTexCache.set(faction, Promise.all([
+      load('color', true), load('normal'), load('other'), load('team'),
+    ]).then(([color, normal, other, team]) => ({ color, normal, other, team }))
+      .catch(e => { console.warn('faction tex load failed', faction, e); return null; }));
+  }
+  return factionTexCache.get(faction);
+}
+function defNameFaction(defName) {
+  const p = defName.slice(0, 3);
+  return (p === 'arm' || p === 'cor' || p === 'leg') ? p : null;
+}
+
 // ---- model cache ----
 // One Object3D template per unit-def-name. Lazy fetched on first use.
 const loader = new GLTFLoader();
@@ -308,23 +336,31 @@ async function applyFrame(idx) {
       const proto = await getProto(def.n, def.r);
       obj = new THREE.Group();
       const model = proto.clone(true);
-      model.scale.setScalar(UNIT_SCALE);          // make units actually visible
-      // The icexuick GLBs are geometry-only (no diffuse texture, just plain
-      // grey MeshStandardMaterial). Apply per-team color to each mesh's
-      // material — clone first so other instances of the same proto keep
-      // their own color. flatShading shows facets so geometry detail reads.
-      const teamHex = TEAM_COLORS[team % TEAM_COLORS.length];
-      model.traverse(o => {
-        if (o.isMesh && o.material && o.material.color) {
-          const m = o.material.clone();
-          m.color.setHex(teamHex);
-          m.flatShading = true;
-          m.metalness = 0.2;     // less plasticky-shiny than default 0.5
-          m.roughness = 0.7;
-          m.needsUpdate = true;
-          o.material = m;
-        }
-      });
+      model.scale.setScalar(UNIT_SCALE);
+      // Apply the per-faction texture atlas (color/normal/other) to every
+      // mesh in this unit — the GLB's UVs already map into the atlas, so
+      // each mesh ends up wearing the right region. Async: kick the fetch
+      // and assign once it lands.
+      const faction = defNameFaction(def.n);
+      if (faction) {
+        getFactionTextures(faction).then(tex => {
+          if (!tex) return;
+          model.traverse(o => {
+            if (o.isMesh && o.material && o.material.color) {
+              const m = o.material.clone();
+              m.map        = tex.color;
+              m.normalMap  = tex.normal;
+              m.roughnessMap = tex.other;   // BAR packs rough/metal/team in 1
+              m.metalnessMap = tex.other;
+              m.color.setHex(0xffffff);     // let the texture show as-is
+              m.metalness = 1.0;
+              m.roughness = 1.0;
+              m.needsUpdate = true;
+              o.material = m;
+            }
+          });
+        });
+      }
       obj.add(model);
       // Team-colored disk on the ground beneath the unit — radius scales
       // along with the model so it stays in proportion.
