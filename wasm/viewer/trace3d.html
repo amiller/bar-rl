@@ -468,6 +468,15 @@ async function applyFrame(idx) {
       obj = new THREE.Group();
       const model = proto.clone(true);
       model.scale.setScalar(UNIT_SCALE);
+      // GLB local origin is usually at the model CENTER, not bottom — so
+      // setting obj.position.y = terrain leaves the model floating ~half
+      // its height above terrain. Compute scaled bbox.min.y and lower the
+      // model so its base sits on the group origin (which we'll then place
+      // on the terrain).
+      {
+        const bbox = new THREE.Box3().setFromObject(model);
+        model.position.y -= bbox.min.y;
+      }
       // Apply the per-faction texture atlas (color/normal/other) to every
       // mesh in this unit — the GLB's UVs already map into the atlas, so
       // each mesh ends up wearing the right region. Async: kick the fetch
