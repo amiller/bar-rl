@@ -80,13 +80,13 @@ sun.position.set(3000, 4500, 1500); scene.add(sun);
 scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 
 // URL-tunable knobs so you can iterate without rebuilding:
-//   ?unitScale=2     — model size (1 = native, 4 = chunky)
-//   ?heightScale=600 — terrain displacement amplitude (engine units)
+//   ?unitScale=1.5   — model size (1 = native, 4 = chunky)
+//   ?heightScale=N   — override the per-map auto-derived terrain amplitude
 //   ?flat=1          — pin units to y=0 (skip terrain elevation from trace)
 //   ?wireframe=1     — wireframe on the ground (debug; shows displacement)
 const QP = new URLSearchParams(location.search);
-const UNIT_SCALE   = +(QP.get('unitScale')   ?? 1.5);
-const HEIGHT_SCALE = +(QP.get('heightScale') ?? 600);
+const UNIT_SCALE   = +(QP.get('unitScale')   ?? 1.0);
+const HEIGHT_SCALE_OVERRIDE = QP.has('heightScale') ? +QP.get('heightScale') : null;
 const UNITS_FLAT   =  (QP.get('flat')        ?? '0') === '1';
 const GROUND_WIRE  =  (QP.get('wireframe')   ?? '0') === '1';
 
@@ -97,9 +97,13 @@ const GROUND_WIRE  =  (QP.get('wireframe')   ?? '0') === '1';
 // stair-stepping in ~16-pixel chunks.
 let mapX = 4096, mapZ = 4096;
 const GROUND_SEGS = 512;
+// displacementScale + Bias get set per-map from the BAR API once the trace's
+// meta resolves the map name (see setMapTexture). Defaults are a fallback
+// for if the API call fails — wide enough that hills are visible on most maps.
 const groundMat = new THREE.MeshStandardMaterial({
   color: 0x808080, roughness: 0.85,
-  displacementScale: HEIGHT_SCALE, displacementBias: 0,
+  displacementScale: HEIGHT_SCALE_OVERRIDE ?? 500,
+  displacementBias: 0,
   wireframe: GROUND_WIRE,
 });
 const ground = new THREE.Mesh(
@@ -113,6 +117,20 @@ function setMapTexture(scriptName) {
   // BAR's API expects lowercase + spaces→underscores: "Great Divide V1" → great_divide_v1
   const file = scriptName.toLowerCase().replace(/\s+/g, '_');
   const baseUrl = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}`;
+  // Fetch map metadata to size the displacement scale so it matches the
+  // engine's actual height range — otherwise units (in engine y) float above
+  // the rendered terrain (in [0..scale]).
+  if (!HEIGHT_SCALE_OVERRIDE) {
+    fetch(`https://api.bar-rts.com/maps?fileName=${encodeURIComponent(file)}`)
+      .then(r => r.json()).then(j => {
+        const m = (j.data || []).find(m => m.fileName === file);
+        if (!m || m.maxDepth == null) return;
+        groundMat.displacementScale = (m.maxDepth - (m.minDepth || 0));
+        groundMat.displacementBias  = (m.minDepth || 0);
+        groundMat.needsUpdate = true;
+        console.log(`[map] ${file}: depth ${m.minDepth}..${m.maxDepth}`);
+      }).catch(() => {});
+  }
   // Color: texture-hq.jpg (high quality — much crisper than -mq when zoomed in)
   texLoader.load(`${baseUrl}/texture-hq.jpg`, tex => {
     tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false;
@@ -138,7 +156,7 @@ function setMapTexture(scriptName) {
     groundMat.displacementMap = dispTex;
     // Normal map: sobel-derive per-pixel slope from the heightmap pixels.
     // Strength controls how exaggerated the bumps look in light reflection.
-    const normCanvas = heightmapToNormalMap(bm, /*strength=*/ HEIGHT_SCALE / 64);
+    const normCanvas = heightmapToNormalMap(bm, /*strength=*/ groundMat.displacementScale / 64);
     const normTex = new THREE.CanvasTexture(normCanvas);
     normTex.flipY = true;
     groundMat.normalMap = normTex;
@@ -282,10 +300,9 @@ const liveByUid = new Map();   // uid -> Object3D (cloned proto, in scene)
 // expect to see in any single frame (resized as needed). Cheap enough to
 // render thousands per frame this way.
 const PROJ_MAX_PER_TEAM = 4096;
-// Big bright orb so projectiles are actually visible at full-map zoom.
-// depthTest off so they always render on top — a tracer that's hidden behind
-// terrain isn't useful for visualizing combat.
-const projGeom = new THREE.SphereGeometry(20, 8, 6);
+// Small bright orb. depthTest off so they always render on top — a tracer
+// that's hidden behind terrain isn't useful for visualizing combat.
+const projGeom = new THREE.SphereGeometry(8, 6, 4);
 const projMeshes = new Map();   // teamId -> InstancedMesh
 function getProjMesh(team) {
   let m = projMeshes.get(team);
