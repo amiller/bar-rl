@@ -91,11 +91,12 @@ const UNITS_FLAT   =  (QP.get('flat')        ?? '0') === '1';
 const GROUND_WIRE  =  (QP.get('wireframe')   ?? '0') === '1';
 
 // Ground plane sized to the map (defaults to 4096; updated from meta).
-// Heavily segmented so the displacement map has somewhere to push to —
-// 256×256 verts gives ~16 engine units per vertex on a 4096 map (plenty for
-// silhouette hills, won't tax a midrange GPU).
+// Match the heightmap resolution (BAR ships height.png at ~513×513 for an
+// 8x8 map, scaling up for bigger maps). 512 segments = each height-pixel
+// gets its own vertex, so silhouettes follow the heightmap rather than
+// stair-stepping in ~16-pixel chunks.
 let mapX = 4096, mapZ = 4096;
-const GROUND_SEGS = 256;
+const GROUND_SEGS = 512;
 const groundMat = new THREE.MeshStandardMaterial({
   color: 0x808080, roughness: 0.85,
   displacementScale: HEIGHT_SCALE, displacementBias: 0,
@@ -265,11 +266,70 @@ function getProto(defName, radius) {
 // ---- trace ----
 let meta = null;          // { defs: { id -> {n, r} } }
 let frames = [];          // [ { f, u: [[uid,team,def,x,z,hp], ...] } ]
+let projByFrame = new Map();   // frame# -> array of [pid,team,x,y,z,vx,vz,type]
 const liveByUid = new Map();   // uid -> Object3D (cloned proto, in scene)
+
+// ---- projectiles ----
+// One InstancedMesh per team, sized to the largest projectile-count we
+// expect to see in any single frame (resized as needed). Cheap enough to
+// render thousands per frame this way.
+const PROJ_MAX_PER_TEAM = 4096;
+const projGeom = new THREE.SphereGeometry(8, 6, 4);   // small bright dot
+const projMeshes = new Map();   // teamId -> InstancedMesh
+function getProjMesh(team) {
+  let m = projMeshes.get(team);
+  if (!m) {
+    const color = TEAM_COLORS[team % TEAM_COLORS.length];
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 });
+    m = new THREE.InstancedMesh(projGeom, mat, PROJ_MAX_PER_TEAM);
+    m.count = 0;
+    m.frustumCulled = false;
+    scene.add(m);
+    projMeshes.set(team, m);
+  }
+  return m;
+}
+const _tmp = new THREE.Matrix4();
+const _scl = new THREE.Vector3(1, 1, 1);
+const _quat = new THREE.Quaternion();
+const _pos  = new THREE.Vector3();
+function applyProjectiles(frameNum) {
+  // Find the projectile snapshot with the highest f ≤ frameNum.
+  // (projByFrame keys are sparse — keyed by sim-frame numbers like 0, 6, 12)
+  // Simple linear scan back is fine for 750 keys; could binary-search later.
+  let best = null;
+  for (const k of projByFrame.keys()) {
+    if (k <= frameNum && (best === null || k > best)) best = k;
+  }
+  // Clear all team meshes
+  for (const m of projMeshes.values()) m.count = 0;
+  if (best === null) return;
+  const list = projByFrame.get(best);
+  // Bucket by team so each InstancedMesh is one draw call
+  const byTeam = new Map();
+  for (const p of list) {
+    const team = p[1];
+    if (!byTeam.has(team)) byTeam.set(team, []);
+    byTeam.get(team).push(p);
+  }
+  for (const [team, ps] of byTeam) {
+    const m = getProjMesh(team);
+    const n = Math.min(ps.length, PROJ_MAX_PER_TEAM);
+    for (let i = 0; i < n; i++) {
+      const [, , x, y, z] = ps[i];
+      _pos.set(x, y, z);
+      _tmp.compose(_pos, _quat, _scl);
+      m.setMatrixAt(i, _tmp);
+    }
+    m.count = n;
+    m.instanceMatrix.needsUpdate = true;
+  }
+}
 
 async function loadTraceFromText(text, label) {
   const lines = text.split('\n').filter(Boolean);
-  meta = null; frames = []; liveByUid.forEach(o => scene.remove(o)); liveByUid.clear();
+  meta = null; frames = []; projByFrame = new Map();
+  liveByUid.forEach(o => scene.remove(o)); liveByUid.clear();
   for (const ln of lines) {
     let r; try { r = JSON.parse(ln); } catch { continue; }
     if (r.t === 'meta') {
@@ -278,6 +338,7 @@ async function loadTraceFromText(text, label) {
       setMapTexture(r.mapName);
     }
     else if (r.t === 'f') frames.push(r);
+    else if (r.t === 'p') projByFrame.set(r.f, r.p);
   }
   document.getElementById('status').textContent =
     `${label} — ${frames.length} frames, ${Object.keys(meta?.defs||{}).length} defs`;
@@ -331,6 +392,7 @@ if (initial) await loadTraceUrl(initial);
 async function applyFrame(idx) {
   const fr = frames[idx]; if (!fr) return;
   document.getElementById('frameLabel').textContent = `f=${fr.f}`;
+  applyProjectiles(fr.f);
   const seen = new Set();
   for (const u of (fr.u || [])) {
     // Trace formats:

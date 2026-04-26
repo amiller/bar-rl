@@ -23,6 +23,14 @@ local spGetUnitTeam     = Spring.GetUnitTeam
 local spGetUnitHealth   = Spring.GetUnitHealth
 local spGetUnitDefID    = Spring.GetUnitDefID
 local spGetUnitHeading  = Spring.GetUnitHeading
+-- Projectiles: in widget (unsynced) GetVisibleProjectiles needs an allyTeam
+-- argument; -1 (or no arg) returns all visible. Replay/spectator mode sees
+-- everything so this gives us the full set.
+local spGetVisibleProjectiles = Spring.GetVisibleProjectiles
+local spGetProjectilePosition = Spring.GetProjectilePosition
+local spGetProjectileVelocity = Spring.GetProjectileVelocity
+local spGetProjectileTeamID   = Spring.GetProjectileTeamID
+local spGetProjectileType     = Spring.GetProjectileType
 local sfmt              = string.format
 local tconcat           = table.concat
 
@@ -99,6 +107,33 @@ function widget:GameFrame(f)
         end
     end
     w(sfmt('{"t":"f","f":%d,"u":[%s]}', f, tconcat(parts, ",")))
+
+    -- Projectiles: separate "p" event per frame. Each entry is
+    --   [pid, team, x, y, z, vx, vz, type_int]
+    -- type_int compresses common Spring projectile-type strings to small ints
+    -- so the trace stays compact (a frame with 200 projectiles is fine).
+    local projs = spGetVisibleProjectiles and spGetVisibleProjectiles(-1)
+    if projs and #projs > 0 then
+        local pp = {}
+        for i = 1, #projs do
+            local pid = projs[i]
+            local x, y, z = spGetProjectilePosition(pid)
+            if x then
+                local vx, vy, vz = spGetProjectileVelocity(pid)
+                local pt = spGetProjectileType(pid) or ""
+                local typeInt = (pt == "missile") and 1
+                             or (pt == "weapon")  and 2
+                             or (pt == "piece")   and 3
+                             or 0
+                pp[#pp+1] = sfmt("[%d,%d,%.1f,%.1f,%.1f,%.2f,%.2f,%d]",
+                    pid, spGetProjectileTeamID(pid) or -1,
+                    x, y or 0, z, vx or 0, vz or 0, typeInt)
+            end
+        end
+        if #pp > 0 then
+            w(sfmt('{"t":"p","f":%d,"p":[%s]}', f, tconcat(pp, ",")))
+        end
+    end
 end
 
 function widget:UnitCreated(uid, defId, team)
