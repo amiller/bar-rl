@@ -274,16 +274,29 @@ const liveByUid = new Map();   // uid -> Object3D (cloned proto, in scene)
 // expect to see in any single frame (resized as needed). Cheap enough to
 // render thousands per frame this way.
 const PROJ_MAX_PER_TEAM = 4096;
-const projGeom = new THREE.SphereGeometry(8, 6, 4);   // small bright dot
+// Big bright orb so projectiles are actually visible at full-map zoom.
+// depthTest off so they always render on top — a tracer that's hidden behind
+// terrain isn't useful for visualizing combat.
+const projGeom = new THREE.SphereGeometry(20, 8, 6);
 const projMeshes = new Map();   // teamId -> InstancedMesh
 function getProjMesh(team) {
   let m = projMeshes.get(team);
   if (!m) {
-    const color = TEAM_COLORS[team % TEAM_COLORS.length];
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 });
+    // Per-team tint, but heavily mixed toward a bright tracer-yellow so
+    // projectiles read as projectiles (not as units). 80% white-yellow + 20%
+    // team color gives just enough team affiliation without blending into
+    // the team ring beneath.
+    const teamCol = new THREE.Color(TEAM_COLORS[team % TEAM_COLORS.length]);
+    const tracerYellow = new THREE.Color(0xfff2a0);
+    const mixed = teamCol.clone().lerp(tracerYellow, 0.8);
+    const mat = new THREE.MeshBasicMaterial({
+      color: mixed, transparent: true, opacity: 1.0,
+      depthTest: false, depthWrite: false,
+    });
     m = new THREE.InstancedMesh(projGeom, mat, PROJ_MAX_PER_TEAM);
     m.count = 0;
     m.frustumCulled = false;
+    m.renderOrder = 999;     // draw last (on top of everything)
     scene.add(m);
     projMeshes.set(team, m);
   }
