@@ -229,11 +229,13 @@ function heightmapToNormalMap(bm, strength) {
   return dst;
 }
 
-// debug exposure (used by probe-mat.mjs)
+// debug exposure (used by probe-mat.mjs etc.)
 window.__scene  = scene;
 window.__cam    = cam;
 window.__ground = ground;
 window.__groundMat = groundMat;
+window.__THREE  = THREE;
+window.__sampleTerrainY = sampleTerrainY;
 
 function fitMap(x, z) {
   mapX = x; mapZ = z;
@@ -289,8 +291,12 @@ function defNameFaction(defName) {
 
 // ---- model cache ----
 // One Object3D template per unit-def-name. Lazy fetched on first use.
+// Stored alongside the proto: precomputed bbox-min-y offset (in *unit-scale*
+// engine units) so each instance can be shifted up by that amount to put its
+// base on the group origin without recomputing per-instance (cloned matrices
+// can be stale and yield wrong bbox in some cases).
 const loader = new GLTFLoader();
-const protoCache = new Map();      // defName -> Promise<Object3D>
+const protoCache = new Map();      // defName -> Promise<{ proto, baseOffsetY }>
 const fallback = (radius) => {
   const m = new THREE.Mesh(
     new THREE.CylinderGeometry(radius || 12, radius || 12, 8, 12),
@@ -305,7 +311,18 @@ function getProto(defName, radius) {
       return rsp.arrayBuffer();
     }).then(buf => new Promise((res, rej) =>
       loader.parse(buf, '', g => res(g.scene), rej)
-    )).catch(e => { console.warn(`fallback for ${defName}:`, e.message); return fallback(radius); }));
+    )).catch(e => {
+      console.warn(`fallback for ${defName}:`, e.message);
+      return fallback(radius);
+    }).then(proto => {
+      // Compute bbox offset ONCE, on the proto, with fully-resolved matrices.
+      // Returns baseOffsetY in the proto's native (un-scaled) coords. Each
+      // instance multiplies by its own UNIT_SCALE.
+      proto.updateMatrixWorld(true);
+      const bbox = new THREE.Box3().setFromObject(proto);
+      const baseOffsetYNative = -bbox.min.y;   // shift so bottom = origin
+      return { proto, baseOffsetYNative };
+    }));
   }
   return protoCache.get(defName);
 }
@@ -464,19 +481,16 @@ async function applyFrame(idx) {
     if (!obj) {
       const def = meta.defs[String(defId)];
       if (!def) continue;
-      const proto = await getProto(def.n, def.r);
+      const protoEntry = await getProto(def.n, def.r);
+      const proto = protoEntry.proto || protoEntry;     // back-compat with fallback path
+      const baseOffsetNative = protoEntry.baseOffsetYNative ?? 0;
       obj = new THREE.Group();
       const model = proto.clone(true);
       model.scale.setScalar(UNIT_SCALE);
-      // GLB local origin is usually at the model CENTER, not bottom — so
-      // setting obj.position.y = terrain leaves the model floating ~half
-      // its height above terrain. Compute scaled bbox.min.y and lower the
-      // model so its base sits on the group origin (which we'll then place
-      // on the terrain).
-      {
-        const bbox = new THREE.Box3().setFromObject(model);
-        model.position.y -= bbox.min.y;
-      }
+      // Shift model up by precomputed proto bbox-min-y, scaled by UNIT_SCALE.
+      // This anchors the model's BASE at the group's origin (not its center),
+      // so when group is placed on terrain the model sits on it.
+      model.position.y = baseOffsetNative * UNIT_SCALE;
       // Apply the per-faction texture atlas (color/normal/other) to every
       // mesh in this unit — the GLB's UVs already map into the atlas, so
       // each mesh ends up wearing the right region. Async: kick the fetch
