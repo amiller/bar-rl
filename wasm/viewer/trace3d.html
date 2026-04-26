@@ -76,21 +76,30 @@ sun.position.set(3000, 4500, 1500); scene.add(sun);
 // Brighter ambient overall so the texture-mq.jpg map reads at default zoom.
 scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 
-// Make units render at a multiple of native size — BAR units are sized for
-// in-engine zoom, but in our top-down scrubber view at the full-map scale
-// they're invisible specks. Boost so they read at the default zoom.
-const UNIT_SCALE = 4;
-// Lift the map plane just enough that units (lifted slightly themselves)
-// stop intersecting it. We don't yet have a heightmap, so units sit flat at
-// y = 0 regardless of trace y value.
-const UNITS_FLAT = true;
+// URL-tunable knobs so you can iterate without rebuilding:
+//   ?unitScale=2     — model size (1 = native, 4 = chunky)
+//   ?heightScale=600 — terrain displacement amplitude (engine units)
+//   ?flat=1          — pin units to y=0 (skip terrain elevation from trace)
+//   ?wireframe=1     — wireframe on the ground (debug; shows displacement)
+const QP = new URLSearchParams(location.search);
+const UNIT_SCALE   = +(QP.get('unitScale')   ?? 1.5);
+const HEIGHT_SCALE = +(QP.get('heightScale') ?? 600);
+const UNITS_FLAT   =  (QP.get('flat')        ?? '0') === '1';
+const GROUND_WIRE  =  (QP.get('wireframe')   ?? '0') === '1';
 
 // Ground plane sized to the map (defaults to 4096; updated from meta).
-// Texture is fetched from api.bar-rts.com on map-name resolve; falls back to
-// dark grey if the request 404s.
+// Heavily segmented so the displacement map has somewhere to push to —
+// 256×256 verts gives ~16 engine units per vertex on a 4096 map (plenty for
+// silhouette hills, won't tax a midrange GPU).
 let mapX = 4096, mapZ = 4096;
-const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a1f1a, roughness: 1.0 });
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(mapX, mapZ), groundMat);
+const GROUND_SEGS = 256;
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0x1a1f1a, roughness: 1.0, flatShading: true,
+  displacementScale: HEIGHT_SCALE, displacementBias: 0,
+  wireframe: GROUND_WIRE,
+});
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(mapX, mapZ, GROUND_SEGS, GROUND_SEGS), groundMat);
 ground.rotation.x = -Math.PI/2; ground.position.set(mapX/2, 0, mapZ/2); scene.add(ground);
 
 const texLoader = new THREE.TextureLoader();
@@ -99,15 +108,75 @@ function setMapTexture(scriptName) {
   if (!scriptName) return;
   // BAR's API expects lowercase + spaces→underscores: "Great Divide V1" → great_divide_v1
   const file = scriptName.toLowerCase().replace(/\s+/g, '_');
-  const url  = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}/texture-mq.jpg`;
-  texLoader.load(url, tex => {
-    tex.colorSpace = THREE.SRGBColorSpace;
-    // Map textures from BAR are oriented with +Z = south; PlaneGeometry's UVs
-    // run with Y-flip after rotation. Flipping Y here matches what you'd see
-    // in-game (north of map = "back" of screen at default angle).
-    tex.flipY = false;
+  const baseUrl = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}`;
+  // Color: texture-mq.jpg (medium quality, ~1MB)
+  texLoader.load(`${baseUrl}/texture-mq.jpg`, tex => {
+    tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false;
     groundMat.map = tex; groundMat.color.setHex(0xffffff); groundMat.needsUpdate = true;
-  }, undefined, () => console.warn('no map tex for', scriptName, url));
+  }, undefined, () => console.warn('no texture-mq for', scriptName));
+  // Displacement: height.png. Three.js doesn't recompute vertex normals after
+  // displacementMap moves them, so without a NORMAL MAP the surface still
+  // shades as if it were flat — light reflects identically across the whole
+  // plane, hills are invisible at default zoom (only visible in silhouette).
+  // We fix this by deriving a normal map from the heightmap on the fly via
+  // a 3×3 sobel filter on a canvas, and feeding it into the same material.
+  fetch(`${baseUrl}/height.png`).then(r => r.blob()).then(createImageBitmap).then(bm => {
+    // Displacement texture: directly from the bitmap.
+    const dispTex = new THREE.CanvasTexture(bitmapToCanvas(bm));
+    dispTex.flipY = true;
+    groundMat.displacementMap = dispTex;
+    // Normal map: sobel-derive per-pixel slope from the heightmap pixels.
+    // Strength controls how exaggerated the bumps look in light reflection.
+    const normCanvas = heightmapToNormalMap(bm, /*strength=*/ HEIGHT_SCALE / 64);
+    const normTex = new THREE.CanvasTexture(normCanvas);
+    normTex.flipY = true;
+    groundMat.normalMap = normTex;
+    // flatShading conflicts with normalMap (it overrides per-vertex normals).
+    // Switch to smooth shading so the normalMap's per-pixel normals actually
+    // light the surface.
+    groundMat.flatShading = false;
+    groundMat.needsUpdate = true;
+  }).catch(e => console.warn('no height.png for', scriptName, e.message));
+}
+
+function bitmapToCanvas(bm) {
+  const c = document.createElement('canvas');
+  c.width = bm.width; c.height = bm.height;
+  c.getContext('2d').drawImage(bm, 0, 0);
+  return c;
+}
+
+// Sobel 3x3 height→normal: each output pixel encodes the surface normal
+// at that height-sample as RGB = (nx*0.5+0.5, ny*0.5+0.5, nz*0.5+0.5).
+function heightmapToNormalMap(bm, strength) {
+  const w = bm.width, h = bm.height;
+  const src = document.createElement('canvas'); src.width = w; src.height = h;
+  src.getContext('2d').drawImage(bm, 0, 0);
+  const sx = src.getContext('2d').getImageData(0, 0, w, h).data;
+  const dst = document.createElement('canvas'); dst.width = w; dst.height = h;
+  const dctx = dst.getContext('2d');
+  const out = dctx.createImageData(w, h);
+  const at = (x, y) => sx[((y * w) + x) * 4];     // R = grayscale luma
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const xm = Math.max(0, x-1), xp = Math.min(w-1, x+1);
+    const ym = Math.max(0, y-1), yp = Math.min(h-1, y+1);
+    // Sobel-like dx, dy (signed)
+    const dx = (at(xp, ym) + 2*at(xp, y) + at(xp, yp))
+             - (at(xm, ym) + 2*at(xm, y) + at(xm, yp));
+    const dy = (at(xm, yp) + 2*at(x, yp) + at(xp, yp))
+             - (at(xm, ym) + 2*at(x, ym) + at(xp, ym));
+    const nx = -dx * strength / 1024;  // /1024 to normalize sobel sum scale
+    const ny = -dy * strength / 1024;
+    const nz = 1.0;
+    const inv = 1 / Math.hypot(nx, ny, nz);
+    const o = (y * w + x) * 4;
+    out.data[o    ] = (nx * inv * 0.5 + 0.5) * 255;
+    out.data[o + 1] = (ny * inv * 0.5 + 0.5) * 255;
+    out.data[o + 2] = (nz * inv * 0.5 + 0.5) * 255;
+    out.data[o + 3] = 255;
+  }
+  dctx.putImageData(out, 0, 0);
+  return dst;
 }
 
 function fitMap(x, z) {
@@ -240,6 +309,22 @@ async function applyFrame(idx) {
       obj = new THREE.Group();
       const model = proto.clone(true);
       model.scale.setScalar(UNIT_SCALE);          // make units actually visible
+      // The icexuick GLBs are geometry-only (no diffuse texture, just plain
+      // grey MeshStandardMaterial). Apply per-team color to each mesh's
+      // material — clone first so other instances of the same proto keep
+      // their own color. flatShading shows facets so geometry detail reads.
+      const teamHex = TEAM_COLORS[team % TEAM_COLORS.length];
+      model.traverse(o => {
+        if (o.isMesh && o.material && o.material.color) {
+          const m = o.material.clone();
+          m.color.setHex(teamHex);
+          m.flatShading = true;
+          m.metalness = 0.2;     // less plasticky-shiny than default 0.5
+          m.roughness = 0.7;
+          m.needsUpdate = true;
+          o.material = m;
+        }
+      });
       obj.add(model);
       // Team-colored disk on the ground beneath the unit — radius scales
       // along with the model so it stays in proportion.
