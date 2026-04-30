@@ -1,0 +1,145 @@
+name: Live smoke test
+
+# Hits the live Pages deploy in real chromium and clicks Play on a few
+# playable replays. Catches the kind of "diagnostic recursion / stale
+# cache / wasm export check" regressions we kept shipping silently. Posts
+# a GitHub issue when the smoke fails (or auto-closes when it recovers).
+
+on:
+  schedule:
+    - cron: '0 13 * * *'   # daily 13:00 UTC (~9am ET) — gives BAR a few hours to push their morning version drift
+  workflow_dispatch:        # manual run via UI
+    inputs:
+      replays:
+        description: 'How many replays to test'
+        default: '3'
+      wait_sec:
+        description: 'Seconds to watch each session (>=150 to actually reach sim frames; pool-plant takes ~40s)'
+        default: '180'
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install playwright + chromium
+        working-directory: wasm
+        run: |
+          npm install --no-save playwright
+          npx playwright install chromium --with-deps
+
+      - name: Patch chromium path for runner
+        run: |
+          # The smoke script hardcodes a local chromium path; replace it with
+          # whatever path playwright installs to on this runner.
+          CP=$(node -e "console.log(require('playwright').chromium.executablePath())")
+          echo "chromium at: $CP"
+          sed -i "s|/home/amiller/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome|$CP|g" \
+            wasm/scripts/live-smoke-test.mjs
+
+      - name: Run smoke test
+        id: smoke
+        working-directory: wasm
+        run: |
+          REPLAYS="${{ inputs.replays || '3' }}"
+          WAIT="${{ inputs.wait_sec || '180' }}"
+          set +e
+          node scripts/live-smoke-test.mjs https://bar-replay-demo.pages.dev "$REPLAYS" "$WAIT" 2>&1 | tee /tmp/smoke-out.log
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+          set -e
+          # Capture latest summary.json
+          LATEST=$(ls -dt /tmp/smoke-test-* 2>/dev/null | head -1)
+          [[ -d "$LATEST" ]] && cp "$LATEST/summary.json" /tmp/smoke-summary.json || true
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-${{ github.run_id }}
+          path: |
+            /tmp/smoke-out.log
+            /tmp/smoke-summary.json
+          retention-days: 30
+
+      - name: Open or update tracking issue on failure
+        if: steps.smoke.outputs.exitcode != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let summary = {};
+            try { summary = JSON.parse(fs.readFileSync('/tmp/smoke-summary.json','utf8')); } catch {}
+            const sigs = {};
+            for (const r of summary.results || []) {
+              if (r.pass) continue;
+              const sig = (r.crashCtx?.why || r.firstError || 'unknown').slice(0, 100);
+              sigs[sig] = (sigs[sig] || 0) + 1;
+            }
+            const sigList = Object.entries(sigs).map(([s,n])=>`- ${n}× \`${s}\``).join('\n');
+            const body = [
+              `**Live smoke test failed.** ${summary.fail}/${(summary.results||[]).length} replays errored.`,
+              ``,
+              `Failure signatures:`,
+              sigList || '(none)',
+              ``,
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              `Pages URL: ${summary.pagesUrl || 'https://bar-replay-demo.pages.dev'}`,
+              ``,
+              `Auto-opened by smoke-test workflow. Will auto-close on next clean run.`,
+            ].join('\n');
+            // Find or create
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'smoke-test', per_page: 20,
+            });
+            if (issues.data.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: 'Live smoke test failing',
+                body,
+                labels: ['smoke-test'],
+              });
+            }
+
+      - name: Auto-close tracking issue on recovery
+        if: steps.smoke.outputs.exitcode == '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'smoke-test', per_page: 20,
+            });
+            for (const i of issues.data) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number,
+                body: `Smoke test passed on run ${context.runId}. Auto-closing.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number,
+                state: 'closed',
+              });
+            }
+
+      - name: Fail step if smoke failed
+        if: steps.smoke.outputs.exitcode != '0'
+        run: exit 1

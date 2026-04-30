@@ -1,0 +1,124 @@
+name: Detect new BAR gameVersion
+
+# Polls bar-rts.com hourly for the current live gameVersion. Compares against
+# what's deployed in /releases/index.json. If a new version is live and we
+# don't have a bundle for it, opens (or updates) a GitHub issue so we know
+# it's time to run the bundle build. Doesn't auto-build for now — the
+# build needs spring-headless + pr-downloader + ~5min of strace, easier on
+# self-hosted (where BAR data is already cached). Hosted runner can be
+# wired up later via setup-spring/cache-bar-data steps.
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # hourly
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Compare live API gameVersion to deployed bundles
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fetch = (await import('node-fetch')).default;
+            const [r1, r2] = await Promise.all([
+              fetch('https://api.bar-rts.com/replays?limit=1&hasBots=false').then(r=>r.json()),
+              fetch('https://bar-replay-demo.pages.dev/releases/index.json', {cache:'no-cache'}).then(r=>r.json()),
+            ]);
+            const latest = r1.data?.[0];
+            if (!latest) { core.warning('no recent replay'); return; }
+            const detail = await fetch(`https://api.bar-rts.com/replays/${encodeURIComponent(latest.id)}`).then(r=>r.json());
+            const liveGV = detail.gameVersion;
+            const have = (r2.releases || []).map(x => x.gameVersion);
+            core.setOutput('liveGV', liveGV);
+            core.setOutput('have', have.join(', '));
+            const supported = have.includes(liveGV);
+            core.setOutput('supported', supported.toString());
+            console.log(`live=${liveGV}  have=${have.join(', ')}  supported=${supported}`);
+
+      - name: Open/update tracking issue if new version
+        if: steps.check.outputs.supported == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const liveGV = '${{ steps.check.outputs.liveGV }}';
+            const have = '${{ steps.check.outputs.have }}';
+            const body = [
+              `**New BAR gameVersion detected and not yet bundled.**`,
+              ``,
+              `- live latest gameVersion: \`${liveGV}\``,
+              `- deployed bundles: ${have}`,
+              ``,
+              `To build & deploy a bundle for \`${liveGV}\`:`,
+              ``,
+              '```bash',
+              '# 1) find a recent replay on a covered map',
+              `python3 -c "`,
+              `import json, urllib.request`,
+              `for r in json.load(urllib.request.urlopen('https://api.bar-rts.com/replays?limit=100&hasBots=false'))['data']:`,
+              `    if (r.get('Map') or {}).get('fileName') == 'supreme_isthmus_v2.1':`,
+              `        d=json.load(urllib.request.urlopen(f\\\"https://api.bar-rts.com/replays/{r['id']}\\\"));`,
+              `        if '${liveGV.split('Beyond All Reason ')[1] || liveGV}' in d.get('gameVersion',''):`,
+              `            print(d['fileName']); break`,
+              `"`,
+              '# 2) fetch + pr-download + strace + bundle pipeline (see release_bundle_workflow memory)',
+              '```',
+              ``,
+              `Auto-opened by detect-new-version workflow. Will auto-close once a matching bundle is in /releases/index.json.`,
+            ].join('\n');
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'new-bar-version', per_page: 20,
+            });
+            // Don't spam: one issue at a time, just comment if it already exists for this version.
+            const matching = issues.data.find(i => i.title.includes(liveGV));
+            if (matching) {
+              console.log(`existing issue #${matching.number} for ${liveGV} — skipping`);
+              return;
+            }
+            // Close stale ones for older versions
+            for (const i of issues.data) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number,
+                body: `Superseded by newer detected version: ${liveGV}. Closing.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number, state: 'closed',
+              });
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: `New BAR gameVersion needs bundle: ${liveGV}`,
+              body,
+              labels: ['new-bar-version'],
+            });
+
+      - name: Auto-close existing tracking issues if version is now supported
+        if: steps.check.outputs.supported == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'new-bar-version', per_page: 20,
+            });
+            for (const i of issues.data) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number,
+                body: `Bundle for ${{ steps.check.outputs.liveGV }} is now deployed. Auto-closing.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: i.number, state: 'closed',
+              });
+            }
