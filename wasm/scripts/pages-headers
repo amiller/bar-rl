@@ -1,0 +1,25 @@
+# Cross-origin isolation for the in-browser engine demo. Required for
+# SharedArrayBuffer / pthreads — applied even on the single-threaded build
+# so the deploy works the moment a pthread rebuild lands.
+# CF Pages strips .html and serves the canonical URL extension-less, so we
+# set headers on both forms (the .html one only matters for the 308 itself).
+/viewer/engine
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+/viewer/engine.html
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+# Same-origin engine assets need CORP so engine.html can load them under COEP.
+# Cache-Control: must-revalidate forces a conditional GET on every page load
+# (cheap 304 if etag matches, full body if it doesn't). Without this, a bad
+# deploy can stick in users' browser caches for max-age (was 86400 = 24h),
+# which bit us when we briefly shipped a broken ASSERTIONS=0 wasm — users
+# kept seeing the broken file from cache hours after the fix deployed.
+/build-wasm-browser/*
+  Cross-Origin-Resource-Policy: same-origin
+  Cache-Control: public, max-age=0, must-revalidate
+
+/build-wasm-browser/*.wasm
+  Content-Type: application/wasm

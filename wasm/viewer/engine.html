@@ -4,16 +4,24 @@
 <meta charset="utf-8">
 <title>BAR Replay Viewer (WASM, 2025.06.19)</title>
 <style>
+  html, body { background: #0d0d0d; color: #ddd; }
   body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-         max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.2rem; }
-  fieldset { margin: 1rem 0; }
-  #log { background: #111; color: #ddd; padding: 0.5rem; height: 60vh;
-         overflow-y: scroll; font-size: 12px; white-space: pre-wrap; }
-  .hint { color: #666; font-size: 0.9rem; }
-  button, input[type=text] { font: inherit; padding: 0.3rem 0.6rem; }
-  #base-status { color: #c80; }
-  #base-status.ok { color: #080; }
+         max-width: 900px; margin: 0 auto; padding: 2rem 1rem; }
+  h1 { font-size: 1.2rem; color: #eee; }
+  a { color: #4aa3ff; }
+  fieldset { margin: 1rem 0; border: 1px solid #2a2a2a; border-radius: 4px; }
+  legend { color: #bbb; padding: 0 6px; }
+  #log { background: #000; color: #ddd; padding: 0.5rem; height: 60vh;
+         overflow-y: scroll; font-size: 12px; white-space: pre-wrap;
+         border: 1px solid #222; }
+  .hint { color: #888; font-size: 0.9rem; }
+  button { font: inherit; padding: 0.3rem 0.7rem;
+           background: #2a2a2a; color: #ddd; border: 1px solid #444;
+           border-radius: 3px; cursor: pointer; }
+  button:hover:not(:disabled) { background: #383838; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  select { background: #1a1a1a; color: #ddd; border: 1px solid #444;
+           padding: 0.3rem 0.5rem; font: inherit; border-radius: 3px; }
 </style>
 </head>
 <body>
@@ -23,22 +31,49 @@
     recorded the demos. No graphics yet (headless). Engine logs land below.
   </p>
 
-  <fieldset>
-    <legend>1. Base content</legend>
-    <p>
-      The engine needs <code>base/</code> archives (springcontent.sdz, etc.)
-      to load any replay. Pick the folder containing those.
-      <span id="base-status">— not loaded —</span>
-    </p>
-    <input type="file" id="base-files" multiple webkitdirectory directory>
-    <span class="hint">(picks a folder; files stay in browser memory)</span>
+  <fieldset id="recent-box" style="display:none">
+    <legend>Recent pro replays (just watch — no engine run)</legend>
+    <p class="hint" id="recent-status">checking server-side rolling menu…</p>
+    <div id="recent-list" style="display:flex; flex-wrap:wrap; gap:8px; max-height:240px; overflow:auto;"></div>
   </fieldset>
 
-  <fieldset>
-    <legend>2. Replay</legend>
-    <p>Pick a <code>.sdfz</code> demo to play back.</p>
-    <input type="file" id="replay-file" accept=".sdfz">
-    <button id="run-btn" disabled>Run</button>
+  <fieldset id="sample-box" style="display:none">
+    <legend>Run the engine yourself (bundled replay)</legend>
+    <p>
+      <span id="sample-pick-label">Bundled BAR replay: </span>
+      <select id="sample-pick"></select>
+      <button id="sample-btn">▶ Run replay</button>
+      <span id="sample-status" class="hint"></span>
+    </p>
+    <p id="build-fresh-row" style="display:none; margin-top:.5rem;">
+      <span class="hint">Or build a fresh bundle from any BAR replay (local only):</span><br>
+      Replay ID: <input id="build-fresh-id" size="28" placeholder="e.g. 6f1a3b…">
+      <button id="build-fresh-btn">▶ Build local bundle</button>
+      <span id="build-fresh-status" class="hint"></span>
+    </p>
+    <div id="any-replay-box" style="display:none; margin-top:.75rem;">
+      <div style="display:flex; align-items:baseline; gap:.5rem; margin-bottom:.4rem;">
+        <span class="hint">Or pick a recent BAR replay (auto-matched to a release-bundle):</span>
+        <button id="any-replay-refresh" style="font-size:.8rem; padding:.1rem .5rem;">↻</button>
+        <span id="any-replay-status" class="hint"></span>
+      </div>
+      <div id="any-replay-list" style="display:flex; flex-wrap:wrap; gap:8px; max-height:340px; overflow:auto;"></div>
+      <details style="margin-top:.5rem;">
+        <summary class="hint" style="cursor:pointer">play by ID (older replay not in the list)</summary>
+        <p style="margin:.4rem 0 0">
+          Release: <select id="any-release-pick"></select>
+          Replay ID: <input id="any-replay-id" size="28" placeholder="from bar-rts.com URL">
+          <button id="any-replay-btn">▶ Play</button>
+          <span id="any-replay-byid-status" class="hint"></span>
+        </p>
+      </details>
+    </div>
+    <p id="trace-out" style="display:none; margin-top:1rem;">
+      Engine wrote a state trace
+      (<span id="trace-size"></span>):
+      <a id="trace-link-3d" target="_blank">▶ open scrubber</a> ·
+      <button id="trace-download">download .jsonl</button>
+    </p>
   </fieldset>
 
   <fieldset>
@@ -46,75 +81,666 @@
     <div id="log"></div>
   </fieldset>
 
+<!-- The wasm wrapper is built as a UMD bundle (not -sEXPORT_ES6), so loading
+     it via `import()` leaves `default` undefined. Pull it in as a classic
+     script and read window.createSpring instead. -->
+<script src="../build-wasm-browser/spring-headless.js"></script>
 <script type="module">
 const $log = document.getElementById('log');
-const $baseStatus = document.getElementById('base-status');
-const $baseFiles = document.getElementById('base-files');
-const $replayFile = document.getElementById('replay-file');
-const $runBtn = document.getElementById('run-btn');
 
-const print = (msg) => { $log.textContent += msg + '\n'; $log.scrollTop = $log.scrollHeight; };
+// Batched print(): pump engine output into a chunk array, flush via rAF so
+// thousands of print() calls per second from pthread workers don't repeatedly
+// rewrite the whole #log textContent (O(n) per append → O(n²) overall) or
+// saturate the CDP IPC. Each rAF, append the joined chunk once and trim if
+// the buffer is huge so the page doesn't accumulate gigabytes.
+const printBuf = [];
+let printScheduled = false;
+const MAX_LOG_CHARS = 256 * 1024;
+function flushPrint() {
+  printScheduled = false;
+  if (!printBuf.length) return;
+  const chunk = printBuf.splice(0, printBuf.length).join('\n') + '\n';
+  // Append by node so we don't pay O(n) for textContent +=.
+  $log.appendChild(document.createTextNode(chunk));
+  if ($log.textContent.length > MAX_LOG_CHARS) {
+    // Drop earliest half of the buffer to cap memory.
+    $log.textContent = $log.textContent.slice(-MAX_LOG_CHARS / 2);
+  }
+  $log.scrollTop = $log.scrollHeight;
+}
+const print = (msg) => {
+  printBuf.push(msg);
+  if (!printScheduled) {
+    printScheduled = true;
+    requestAnimationFrame(flushPrint);
+  }
+};
 
-let baseFiles = null;
-let replayBytes = null;
 let Module = null;
 
-$baseFiles.addEventListener('change', () => {
-  baseFiles = $baseFiles.files;
-  $baseStatus.textContent = `— ${baseFiles.length} files —`;
-  $baseStatus.className = baseFiles.length > 0 ? 'ok' : '';
-  maybeEnableRun();
-});
+// Memory diagnostics. The wasm32 linear memory caps at 4 GB; bad_alloc fires
+// when the engine asks for more than that. We don't know which sim moment
+// pushes us over without measurement, so this samples Module.HEAP8.byteLength
+// (wasm linear memory size) and performance.memory (V8 JS heap) periodically
+// and on abort. Output goes to #log AND window.__memHistory[] for crash dumps.
+window.__memHistory = [];
+function memSnapshot(label) {
+  // We can't probe Module.HEAP8 / Module.wasmMemory under ASSERTIONS=1 —
+  // any access to a non-exported runtime method aborts the whole engine.
+  // performance.memory is enough: when wasm grows, V8's process memory
+  // grows with it (the wasm Memory's ArrayBuffer is part of the JS heap).
+  const pm = (typeof performance !== 'undefined' && performance.memory) || null;
+  const snap = {
+    t: (performance.now() / 1000).toFixed(1),
+    label,
+    jsHeapMB: pm ? (pm.usedJSHeapSize / 1048576).toFixed(1) : '?',
+    jsLimitMB: pm ? (pm.jsHeapSizeLimit / 1048576).toFixed(1) : '?',
+    jsTotalMB: pm ? (pm.totalJSHeapSize / 1048576).toFixed(1) : '?',
+  };
+  window.__memHistory.push(snap);
+  return snap;
+}
+function logMem(label) {
+  try {
+    const s = memSnapshot(label);
+    print(`[mem ${s.t}s ${s.label}] jsHeap=${s.jsHeapMB}/${s.jsTotalMB}/${s.jsLimitMB}MB used/total/limit`);
+  } catch (_) { /* never let mem logging throw upward */ }
+}
+// Sample every 30 wall-seconds while engine is running. Cheap.
+setInterval(() => { if (Module) logMem('tick'); }, 30000);
 
-$replayFile.addEventListener('change', async () => {
-  const f = $replayFile.files[0];
-  if (!f) return;
-  replayBytes = new Uint8Array(await f.arrayBuffer());
-  print(`[host] loaded replay ${f.name} (${replayBytes.byteLength} bytes)`);
-  maybeEnableRun();
-});
-
-function maybeEnableRun() {
-  $runBtn.disabled = !(baseFiles && baseFiles.length && replayBytes);
+// Crash context capture. Called from the engine's onAbort handler with a
+// known cause string; records last 10 memory snapshots + last 60 #log lines
+// into window.__crashContext for the user to paste back.
+//
+// EARLIER VERSION HOOKED window.error/unhandledrejection — but emscripten's
+// pthread spawn path throws benign transient errors during boot, and routing
+// those into a captureCrashContext that calls print() (which schedules rAF,
+// which triggers more worker messages, which throw more errors...) overflowed
+// the stack on every run. So we no longer hook window.error globally; we
+// only capture from the engine's own onAbort callback, which fires once per
+// fatal crash with a clean cause string.
+let __crashCaptured = false;
+function captureCrashContext(why) {
+  if (__crashCaptured) return;     // hard guard against re-entry
+  __crashCaptured = true;
+  try {
+    const log = (document.getElementById('log')?.textContent || '').split('\n').slice(-60).join('\n');
+    const ctx = {
+      when: new Date().toISOString(),
+      why: String(why).slice(0, 500),
+      memHistory: (window.__memHistory || []).slice(-10),
+      logTail: log,
+      href: location.href,
+      ua: navigator.userAgent,
+    };
+    window.__crashContext = ctx;
+    try { localStorage.setItem('bar_crash', JSON.stringify(ctx)); } catch {}
+    // Use console.warn (not console.error) so window.error handlers (if any)
+    // don't catch it. Print to #log AFTER setting __crashCaptured so any
+    // re-fire from print's rAF can't recurse.
+    console.warn('[host] crash context captured — copy window.__crashContext from console');
+    print(`[host] CRASH (${ctx.why}) — copy window.__crashContext from console for diagnostics`);
+    for (const s of ctx.memHistory.slice(-3))
+      print(`[host] mem ${s.t}s ${s.label}: jsHeap=${s.jsHeapMB}/${s.jsLimitMB}MB`);
+  } catch (e) {
+    // Last-ditch: a crash inside the crash handler. Don't propagate.
+    try { console.warn('captureCrashContext failed:', e?.message); } catch {}
+  }
 }
 
-$runBtn.addEventListener('click', async () => {
-  $runBtn.disabled = true;
+async function bootEngine() {
+  const createSpring = window.createSpring;
+  if (!createSpring) throw new Error('spring-headless.js failed to load');
   print('[host] booting WASM engine…');
-
-  // The emscripten -sMODULARIZE=1 -sEXPORT_NAME=createSpring build exposes
-  // a default export; load it dynamically so the page is interactive without
-  // waiting on the 16MB wasm download.
-  const { default: createSpring } = await import('../build-wasm-browser/spring-headless.js');
-
-  Module = await createSpring({
-    print:    (s) => print(s),
+  // Under COOP/COEP cross-origin isolation, `new Worker(<same-origin URL>)`
+  // for the pthread workers gets blocked silently in Chromium even with CORP
+  // set. Workaround: pre-fetch the script as a Blob and pass it via
+  // mainScriptUrlOrBlob — emscripten URL.createObjectURL's it for workers.
+  const scriptResp = await fetch('../build-wasm-browser/spring-headless.js', { cache: 'force-cache' });
+  const scriptBlob = await scriptResp.blob();
+  const M = await createSpring({
+    print: (s) => print(s),
     printErr: (s) => print('[err] ' + s),
     locateFile: (p) => '../build-wasm-browser/' + p,
+    mainScriptUrlOrBlob: scriptBlob,
+    onExit: (code) => { print('[host] engine exit code=' + code); maybePublishTrace(); },
+    // onAbort: do NOT call logMem here — at abort time, Module.HEAP8 is a
+    // getter that calls abort() if memory isn't init'd, which would re-enter
+    // onAbort and recurse to stack overflow. Just record and print.
+    onAbort: (what) => { captureCrashContext('engine abort: ' + what); print('[host] engine abort: ' + what); },
   });
+  installLazyPoolFetch(M);
+  logMem('post-boot');
+  return M;
+}
 
-  print('[host] engine booted, planting files in MEMFS…');
+// Lazy-fetch missing pool chunks. The release-bundle ships an strace-derived
+// subset (good for the map(s) the strace ran on); other maps reference
+// chunks that aren't bundled. Rather than ballooning the bundle to cover
+// every chunk, we fetch missing ones on demand from the BAR rapid pool CDN.
+//
+// CPoolArchive::GetFileImpl retries gzopen 1000× with 100µs sleeps between
+// (~100ms total window). We intercept FS.open for pool/XX/YY.gz, fire an
+// async fetch on the first miss, and let the engine's retry loop pick up
+// the planted chunk a few iterations later.
+function installLazyPoolFetch(M) {
+  const POOL_PROXY = 'https://bar-replay-proxy.socrates1024.workers.dev/pool';
+  const inflight = new Set();
+  let hits = 0, misses = 0;
+  const origOpen = M.FS.open.bind(M.FS);
+  M.FS.open = function(path, flags, mode) {
+    try { return origOpen(path, flags, mode); }
+    catch (e) {
+      const m = typeof path === 'string' && path.match(/\/pool\/([0-9a-f]{2})\/([0-9a-f]{30}\.gz)$/);
+      if (!m) throw e;
+      const key = `${m[1]}/${m[2]}`;
+      if (!inflight.has(key)) {
+        inflight.add(key); misses++;
+        if (misses === 1 || misses % 20 === 0) print(`[lazy-pool] miss #${misses}: ${key}`);
+        fetch(`${POOL_PROXY}/${key}`).then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.arrayBuffer();
+        }).then(buf => {
+          const dir = path.substring(0, path.lastIndexOf('/'));
+          M.FS.mkdirTree(dir);
+          M.FS.writeFile(path, new Uint8Array(buf));
+          hits++;
+        }).catch(err => {
+          print(`[lazy-pool] fetch failed for ${key}: ${err.message}`);
+        }).finally(() => inflight.delete(key));
+      }
+      throw e;
+    }
+  };
+  window.__lazyPoolStats = () => ({ hits, misses, inflight: inflight.size });
+}
 
-  Module.FS.mkdirTree('/work');
-  for (const f of baseFiles) {
-    const rel  = f.webkitRelativePath || f.name;
-    const path = '/work/' + rel;
-    const dir  = path.substring(0, path.lastIndexOf('/'));
-    Module.FS.mkdirTree(dir);
-    Module.FS.writeFile(path, new Uint8Array(await f.arrayBuffer()));
+// After the engine exits, the State Dump widget should have written
+// /work/state_trace.jsonl. Read it from MEMFS, expose as a Blob URL, link to
+// the scrubber for in-browser playback.
+function maybePublishTrace() {
+  if (!Module) return;
+  // Stop live polling first; flush the tail to the live popup.
+  if (window.__liveStream) { clearInterval(window.__liveStream); window.__liveStream = null; }
+  let bytes;
+  try { bytes = Module.FS.readFile('/work/state_trace.jsonl'); }
+  catch (e) { print('[host] no /work/state_trace.jsonl produced (' + e + ')'); return; }
+  if (!bytes || !bytes.length) { print('[host] state_trace.jsonl is empty — widget may not have loaded'); return; }
+  // Final tail flush + done signal for live popup.
+  if (window.__liveBC) {
+    const off = window.__liveOffset || 0;
+    if (bytes.length > off) window.__liveBC.postMessage({type:'append', text: new TextDecoder().decode(bytes.subarray(off))});
+    window.__liveBC.postMessage({type:'final'});
   }
-  print(`[host] planted ${baseFiles.length} base files`);
+  const blob = new Blob([bytes], { type: 'application/jsonlines' });
+  const url = URL.createObjectURL(blob);
+  const $out  = document.getElementById('trace-out');
+  const $size = document.getElementById('trace-size');
+  const $dl   = document.getElementById('trace-download');
+  const $link3d = document.getElementById('trace-link-3d');
+  $size.textContent = (bytes.length / 1024).toFixed(1) + ' KB';
+  // The 3D scrubber honors ?trace=<blob-url>; blob URLs are accessible across
+  // same-origin tabs as long as this engine.html tab stays open.
+  $link3d.href = '../viewer/trace3d.html?trace=' + encodeURIComponent(url);
+  $dl.onclick = () => {
+    const a = document.createElement('a');
+    a.href = url; a.download = 'state_trace.jsonl';
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  $out.style.display = '';
+  print('[host] trace ready: ' + (bytes.length / 1024).toFixed(1) + ' KB');
+}
 
-  Module.FS.writeFile('/work/replay.sdfz', replayBytes);
-  print('[host] planted /work/replay.sdfz');
+function plantFile(M, path, bytes, mtime) {
+  const dir = path.substring(0, path.lastIndexOf('/'));
+  if (dir) M.FS.mkdirTree(dir);
+  M.FS.writeFile(path, bytes);
+  if (mtime) M.FS.utime(path, mtime, mtime);  // matter to ArchiveScanner cache
+}
 
-  print('[host] callMain(["--write-dir","/work","--isolation=true","/work/replay.sdfz"])');
+function callRun(M) {
+  print('[host] callMain(--write-dir /work --isolation=true /work/replay.sdfz)');
   try {
-    Module.callMain(['--write-dir', '/work', '--isolation=true', '/work/replay.sdfz']);
+    M.callMain(['--write-dir', '/work', '--isolation=true', '/work/replay.sdfz']);
   } catch (e) {
     print('[host] callMain threw: ' + e);
   }
-});
+}
+
+// One-click sample-replay flow: fetches /sample/manifest.json on load; if
+// present, exposes a button that streams the bundle into MEMFS in parallel
+// (with progress) and then runs the engine. Bundle is built by
+// pages-bundle-replay.sh and shipped under /sample/.
+async function loadBundles() {
+  // Multi-bundle index (samples/index.json) is preferred. Fall back to legacy
+  // single sample/manifest.json if no index.
+  const bundles = [];
+  try {
+    const r = await fetch('../samples/index.json', { cache: 'no-cache' });
+    if (r.ok) for (const b of (await r.json()).bundles || []) {
+      bundles.push({ id: b.id, label: b.label, totalBytes: b.totalBytes, count: b.count, base: '../samples/' + b.id });
+    }
+  } catch {}
+  if (!bundles.length) {
+    try {
+      const r = await fetch('../sample/manifest.json', { cache: 'no-cache' });
+      if (r.ok) {
+        const m = await r.json();
+        bundles.push({ id: 'sample', label: m.label, totalBytes: m.totalBytes, count: m.count, base: '../sample' });
+      }
+    } catch {}
+  }
+  return bundles;
+}
+
+function renderBundleOptions(bundles, $pick, selectId) {
+  $pick.innerHTML = '';
+  for (const b of bundles) {
+    const opt = document.createElement('option');
+    opt.value = b.base;
+    opt.textContent = `${b.label}  (${(b.totalBytes/1e6).toFixed(0)} MB · ${b.count} files)`;
+    opt.dataset.id = b.id;
+    if (selectId && b.id === selectId) opt.selected = true;
+    $pick.appendChild(opt);
+  }
+}
+
+async function hasLocalServer() {
+  // /api/traces is python-server only. Pages serves the SPA index.html as a
+  // 200 fallback for unknown paths, so check the content-type *and* try to
+  // parse a `traces` field — only the python server returns valid JSON.
+  try {
+    const r = await fetch('/api/traces', { cache: 'no-cache' });
+    if (!r.ok) return false;
+    if (!(r.headers.get('content-type') || '').includes('json')) return false;
+    const j = await r.json();
+    return Array.isArray(j.traces);
+  } catch { return false; }
+}
+
+async function setupBuildFresh($pick, sampleStatus, refreshSingle) {
+  if (!await hasLocalServer()) return;
+  const $row = document.getElementById('build-fresh-row');
+  const $id = document.getElementById('build-fresh-id');
+  const $btn = document.getElementById('build-fresh-btn');
+  const $status = document.getElementById('build-fresh-status');
+  $row.style.display = '';
+  $btn.addEventListener('click', async () => {
+    const replayId = $id.value.trim();
+    if (!replayId) { $status.textContent = 'paste a replay ID first'; return; }
+    $btn.disabled = true; $status.textContent = 'queued…';
+    try {
+      const start = await (await fetch('/api/local-bundle', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({replayId}),
+      })).json();
+      const jobId = start.jobId;
+      let bundleId = start.bundleId;
+      // Poll for completion. Bundle build is map-download bound; can take minutes.
+      while (true) {
+        await new Promise(r => setTimeout(r, 1500));
+        const j = await (await fetch('/api/local-bundle/' + jobId)).json();
+        bundleId = j.bundleId || bundleId;
+        $status.textContent = `${j.stage} · ${j.elapsedSec}s`;
+        if (j.stage === 'done') break;
+        if (j.stage === 'error') throw new Error(j.error || 'build failed');
+      }
+      const bundles = await loadBundles();
+      renderBundleOptions(bundles, $pick, bundleId);
+      refreshSingle(bundles);
+      $status.textContent = `built ${bundleId} — selected in dropdown above`;
+    } catch (e) {
+      $status.textContent = 'error: ' + e.message;
+    } finally {
+      $btn.disabled = false;
+    }
+  });
+}
+
+async function setupSample() {
+  const $box = document.getElementById('sample-box');
+  const $pick = document.getElementById('sample-pick');
+  const $status = document.getElementById('sample-status');
+  const $btn = document.getElementById('sample-btn');
+  const bundles = await loadBundles();
+  // With a single bundle, the dropdown is just noise — hide it and let the
+  // button text carry the label. Reapply on each refresh.
+  const refreshSingle = (bs) => {
+    const single = bs.length === 1;
+    $pick.style.display = single ? 'none' : '';
+    document.getElementById('sample-pick-label').style.display = single ? 'none' : '';
+    $btn.textContent = single
+      ? `▶ Run ${bs[0].label}  (${(bs[0].totalBytes/1e6).toFixed(0)} MB)`
+      : '▶ Run replay';
+    $btn.disabled = bs.length === 0;
+    if (!bs.length) $status.textContent = 'no bundles yet — build one below';
+  };
+  renderBundleOptions(bundles, $pick);
+  refreshSingle(bundles);
+  $box.style.display = '';
+  setupBuildFresh($pick, $status, refreshSingle);
+  $btn.addEventListener('click', async () => {
+    const base = $pick.value;
+    const m = await (await fetch(base + '/manifest.json', { cache: 'no-cache' })).json();
+    const files = m.files.map(f => ({ path: f.path, mtime: f.mtime, url: base + '/' + encodeURI(f.path) }));
+    $btn.disabled = true;
+    await runFromFiles(files, $status);
+  });
+  setupAnyReplay($status);
+}
+
+async function runFromFiles(files, $status) {
+  // Open live 3D scrubber popup BEFORE engine boots so it's ready when
+  // the first state-trace bytes appear. Stash on window so the streaming
+  // setInterval and the post-exit flush can reach it.
+  const liveWin = window.open('../viewer/trace3d.html?live=1', 'bar-3d-live',
+                              'width=1280,height=820');
+  if (!liveWin) print('[host] popup blocked — allow popups to watch live in 3D');
+  else (window.__liveWindows = window.__liveWindows || []).push(liveWin);
+  Module = await bootEngine();
+  window.Module = Module;  // expose for probes/debugging
+  Module.FS.mkdirTree('/work');
+  let done = 0, started = performance.now();
+  const PARALLEL = 8;  // browser fetch slots
+  const queue = files.slice();
+  const total = files.length;
+  async function worker() {
+    while (queue.length) {
+      const f = queue.shift();
+      const r = await fetch(f.url, { cache: 'force-cache' });
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      plantFile(Module, '/work/' + f.path, bytes, f.mtime);
+      done++;
+      if (done % 50 === 0 || done === total) {
+        const sec = ((performance.now() - started) / 1000).toFixed(1);
+        const msg = `planted ${done}/${total} (${sec}s)`;
+        $status.textContent = msg;
+        if (done % 500 === 0 || done === total) print('[host] ' + msg);
+      }
+    }
+  }
+  await Promise.all(Array.from({length: PARALLEL}, worker));
+  $status.textContent = `planted ${done}/${total}; starting engine`;
+  // Stream trace to live popup. Engine writes /work/state_trace.jsonl as
+  // it runs; we read incrementally and postMessage the new bytes. Stops
+  // when callMain exits (maybePublishTrace sends one final 'final' frame).
+  // Use BroadcastChannel — works reliably across COOP browsing-context-group
+  // boundaries (window.open from a COOP=same-origin page puts the popup in
+  // its own group; postMessage to that handle is unreliable).
+  const bc = new BroadcastChannel('bar-live-trace');
+  window.__liveBC = bc;
+  window.__liveStream = setInterval(() => {
+    let bytes;
+    try { bytes = Module.FS.readFile('/work/state_trace.jsonl'); }
+    catch { return; }
+    const off = window.__liveOffset || 0;
+    if (bytes.length > off) {
+      const newPart = new TextDecoder().decode(bytes.subarray(off));
+      window.__liveOffset = bytes.length;
+      bc.postMessage({type: 'append', text: newPart});
+    }
+  }, 1000);
+  callRun(Module);
+}
+
+// Worker proxy that adds CORS to OVH .sdfz fetches. Lives at workers/replay-proxy.js
+// in this repo; deployed via `cd workers && npx wrangler deploy`. If you fork
+// the repo, redeploy the worker under your own subdomain and update this URL.
+const REPLAY_PROXY = 'https://bar-replay-proxy.socrates1024.workers.dev';
+
+async function setupAnyReplay($sampleStatus) {
+  const $box = document.getElementById('any-replay-box');
+  const $rel = document.getElementById('any-release-pick');
+  // Releases-index is published by pages-build.sh from wasm/release-bundles/.
+  let releases = [];
+  try {
+    const r = await fetch('../releases/index.json', { cache: 'no-cache' });
+    if (r.ok) releases = (await r.json()).releases || [];
+  } catch {}
+  if (!releases.length) return;
+  for (const rel of releases) {
+    const opt = document.createElement('option');
+    opt.value = rel.id; opt.dataset.gv = rel.gameVersion;
+    opt.dataset.maps = rel.maps.join('|').toLowerCase();
+    opt.textContent = `${rel.label} · ${rel.maps.length} map(s) · ${(rel.totalBytes/1e6).toFixed(0)}MB`;
+    $rel.appendChild(opt);
+  }
+  $box.style.display = '';
+  setupAnyReplayList(releases, $sampleStatus);
+  setupAnyReplayById(releases, $sampleStatus);
+}
+
+// Shared play path: validate detail against the chosen release, stitch files,
+// run the engine. Both the card list and the by-ID input land here.
+async function playReplay(detail, release, $status, $sampleStatus) {
+  if (detail.gameVersion !== release.gameVersion) {
+    throw new Error(`replay gameVersion ${JSON.stringify(detail.gameVersion)} != release ${JSON.stringify(release.gameVersion)}`);
+  }
+  $status.textContent = 'loading release manifest…';
+  const base = '../releases/' + release.id;
+  const m = await (await fetch(base + '/manifest.json', { cache: 'no-cache' })).json();
+  const files = m.files.map(f => ({ path: f.path, mtime: f.mtime, url: base + '/' + encodeURI(f.path) }));
+  const now = Math.floor(Date.now() / 1000);
+  // Map .sd7 streams from the worker proxy (OVH BAR/maps/, with CORS).
+  // Bundling maps in the release-bundle is impractical: each .sd7 is
+  // 50–140 MB and Cloudflare Pages caps single files at 25 MiB.
+  const mapName = (detail.Map?.fileName || '').toLowerCase();
+  files.push({
+    path: `maps/${mapName}.sd7`,
+    mtime: now,
+    url: `${REPLAY_PROXY}/map/${encodeURIComponent(mapName)}.sd7`,
+  });
+  files.push({
+    path: 'replay.sdfz',
+    mtime: now,
+    url: `${REPLAY_PROXY}/sdfz/${encodeURIComponent(detail.fileName)}`,
+  });
+  $status.textContent = `playing ${detail.fileName}`;
+  await runFromFiles(files, $sampleStatus);
+}
+
+function fmtAgo(ts) {
+  const d = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (d < 60) return `${d|0}s ago`;
+  if (d < 3600) return `${(d/60)|0}m ago`;
+  if (d < 86400) return `${(d/3600)|0}h ago`;
+  return `${(d/86400)|0}d ago`;
+}
+
+function teamsBlurb(allyTeams) {
+  return (allyTeams || []).map(t => {
+    const names = (t.Players || []).map(p => p.name)
+      .concat((t.AIs || []).map(a => 'AI:' + (a.shortName || a.name || '?')))
+      .join(', ');
+    return `${t.winningTeam ? '★ ' : ''}${names || '—'}`;
+  }).join('  vs  ');
+}
+
+async function setupAnyReplayList(releases, $sampleStatus) {
+  const $status = document.getElementById('any-replay-status');
+  const $list = document.getElementById('any-replay-list');
+  const $refresh = document.getElementById('any-replay-refresh');
+  // map → release and gameVersion → release lookups. The summary endpoint
+  // (/replays?limit=N) doesn't return gameVersion, so we probe the first
+  // entry's detail to learn the *current* live gameVersion. A card is only
+  // marked playable if BOTH map and gameVersion match a loaded release.
+  const mapToRelease = new Map();
+  const versionToRelease = new Map();
+  for (const r of releases) {
+    for (const m of r.maps) mapToRelease.set(m.toLowerCase(), r);
+    if (r.gameVersion) versionToRelease.set(r.gameVersion, r);
+  }
+  const knownVersions = [...versionToRelease.keys()];
+
+  async function reload() {
+    $list.textContent = ''; $status.textContent = 'fetching recent replays…';
+    let data = [];
+    try {
+      const r = await fetch('https://api.bar-rts.com/replays?limit=100', { cache: 'no-cache' });
+      data = (await r.json()).data || [];
+    } catch (e) { $status.textContent = 'API error: ' + e.message; return; }
+    // The summary endpoint doesn't include gameVersion. With BAR shipping a
+    // new gameVersion every couple days and 100 recent replays often spanning
+    // 2–3 versions, a single-probe heuristic mislabels most of them. So we
+    // fetch every card's detail concurrently with a small concurrency cap.
+    // ~3s for 100 calls but gives accurate per-card playability.
+    $status.textContent = `fetching gameVersion for ${data.length} replays…`;
+    const detailMap = new Map();
+    const queue = [...data];
+    const CONC = 8;
+    const workers = Array.from({ length: CONC }, async () => {
+      while (queue.length) {
+        const r = queue.shift();
+        try {
+          const d = await (await fetch(`https://api.bar-rts.com/replays/${encodeURIComponent(r.id)}`)).json();
+          detailMap.set(r.id, d);
+        } catch {}
+      }
+    });
+    await Promise.all(workers);
+
+    const liveGameVersion = detailMap.get(data[0]?.id)?.gameVersion || null;
+    const versionsSeen = new Map();   // version → count
+    for (const d of detailMap.values()) {
+      const v = d.gameVersion;
+      if (v) versionsSeen.set(v, (versionsSeen.get(v) || 0) + 1);
+    }
+
+    // Sort: probably-playable (map+version) first, then map-only, then nothing.
+    const rank = (r) => {
+      const mapHit = mapToRelease.has((r.Map?.fileName || '').toLowerCase());
+      const det = detailMap.get(r.id);
+      const verHit = det && versionToRelease.has(det.gameVersion);
+      if (mapHit && verHit) return 0;
+      if (mapHit) return 1;
+      return 2;
+    };
+    data.sort((a, b) => rank(a) - rank(b));
+
+    let playable = 0;
+    for (const r of data) {
+      const mapKey = (r.Map?.fileName || '').toLowerCase();
+      const release = mapToRelease.get(mapKey);
+      const detail = detailMap.get(r.id);
+      const replayVersion = detail?.gameVersion || null;
+      const versionRelease = replayVersion ? versionToRelease.get(replayVersion) : null;
+
+      const card = document.createElement('div');
+      card.style.cssText = 'border:1px solid #333; padding:8px; min-width:280px; max-width:320px; background:#181818; border-radius:3px;';
+      const dur = Math.round((r.durationMs || 0) / 60000);
+      card.innerHTML = `
+        <div><strong>${r.Map?.scriptName || '?'}</strong> · ${dur}m</div>
+        <div class="hint" style="font-size:.85rem">${fmtAgo(r.startTime)}</div>
+        <div class="hint" style="font-size:.85rem; margin:4px 0">${teamsBlurb(r.AllyTeams)}</div>
+      `;
+      const btn = document.createElement('button');
+      btn.style.cssText = 'font-size:.85rem; padding:.15rem .6rem;';
+      // Per-card decision now uses each replay's actual gameVersion.
+      if (release && versionRelease) {
+        playable++;
+        btn.textContent = `▶ Play  (${versionRelease.label})`;
+        btn.addEventListener('click', async () => {
+          [...$list.querySelectorAll('button')].forEach(b => b.disabled = true);
+          $status.textContent = `playing ${r.id.slice(0,8)}…`;
+          try {
+            const det = detail || await (await fetch(`https://api.bar-rts.com/replays/${encodeURIComponent(r.id)}`)).json();
+            if (!det?.fileName) throw new Error('no replay metadata');
+            await playReplay(det, versionRelease, $status, $sampleStatus);
+          } catch (e) {
+            $status.textContent = 'error: ' + e.message;
+            [...$list.querySelectorAll('button')].forEach(b => b.disabled = false);
+          }
+        });
+      } else if (release && !versionRelease) {
+        btn.textContent = `⚠ unsupported version`;
+        btn.disabled = true;
+        btn.title = `replay is on ${replayVersion || '?'} — loaded bundles: ${knownVersions.join(', ') || 'none'}`;
+      } else {
+        btn.textContent = '⚠ no bundle for this map';
+        btn.disabled = true;
+        btn.title = `Loaded release-bundles cover only: ${[...mapToRelease.keys()].join(', ')}`;
+      }
+      card.appendChild(btn);
+      $list.appendChild(card);
+    }
+    // Status line: most-recent live version + a per-version distribution.
+    const distrib = [...versionsSeen.entries()].sort((a,b)=>b[1]-a[1])
+      .map(([v,n]) => `${n}× ${versionToRelease.has(v) ? '✓' : '✗'} ${v.replace('Beyond All Reason ','')}`)
+      .join(' · ');
+    $status.textContent = `${data.length} recent · ${playable} playable · ${distrib}`;
+  }
+  $refresh.addEventListener('click', reload);
+  reload();
+}
+
+function setupAnyReplayById(releases, $sampleStatus) {
+  const $rel = document.getElementById('any-release-pick');
+  const $id = document.getElementById('any-replay-id');
+  const $btn = document.getElementById('any-replay-btn');
+  const $status = document.getElementById('any-replay-byid-status');
+  $btn.addEventListener('click', async () => {
+    const replayId = $id.value.trim();
+    if (!replayId) { $status.textContent = 'paste a replay ID first'; return; }
+    $btn.disabled = true; $status.textContent = 'fetching metadata…';
+    try {
+      const detail = await (await fetch(`https://api.bar-rts.com/replays/${encodeURIComponent(replayId)}`)).json();
+      if (!detail?.fileName) throw new Error('no replay metadata for that ID');
+      const release = releases.find(r => r.id === $rel.value);
+      const map = (detail.Map?.fileName || detail.Map?.scriptName || '').toLowerCase();
+      if (!release.maps.map(m=>m.toLowerCase()).includes(map)) {
+        throw new Error(`map "${map}" not in this release-bundle (has: ${release.maps.join(', ')})`);
+      }
+      await playReplay(detail, release, $status, $sampleStatus);
+    } catch (e) {
+      $status.textContent = 'error: ' + e.message;
+      $btn.disabled = false;
+    }
+  });
+}
+setupSample();
+
+// Recent rolling menu of pre-captured pro-replay traces. Server-side cron
+// runs scripts/refresh-traces.py. Each entry just opens the 3D scrubber with
+// the trace URL — no in-browser engine cost.
+async function setupRecent() {
+  const $box = document.getElementById('recent-box');
+  const $status = document.getElementById('recent-status');
+  const $list = document.getElementById('recent-list');
+  let index;
+  try {
+    const r = await fetch('../traces/index.json', { cache: 'no-cache' });
+    if (!r.ok) return;
+    index = await r.json();
+  } catch { return; }
+  $box.style.display = '';
+  if (!index.traces?.length) {
+    $status.textContent = 'no traces yet — wait for next refresh-traces.py run';
+    return;
+  }
+  const updated = new Date(index.updatedAt * 1000);
+  $status.textContent = `${index.traces.length} traces · last refresh ${updated.toLocaleString()}`;
+  for (const t of index.traces) {
+    const card = document.createElement('div');
+    card.style.cssText = 'border:1px solid #333; padding:8px; min-width:260px; background:#181818;';
+    const teams = (t.teams || []).map(team => {
+      const names = team.players.concat(team.ais.map(a => 'AI:' + a)).join(', ');
+      return `${team.won ? '★ ' : ''}${names || '—'}`;
+    }).join(' &nbsp;vs&nbsp; ');
+    const dur = Math.round((t.durationMs || 0) / 60000);
+    const date = t.startTime ? new Date(t.startTime).toLocaleString() : '?';
+    card.innerHTML = `
+      <div><strong>${t.mapName || '?'}</strong> · ${dur}m · skill ${t.avgSkill}</div>
+      <div class="hint" style="font-size:0.85rem">${date}</div>
+      <div class="hint" style="font-size:0.85rem; margin:4px 0">${teams}</div>
+      <a target="_blank" style="color:#4aa3ff; font-size:0.9rem">▶ 3D scrubber</a>
+    `;
+    const link = card.querySelector('a');
+    link.href = `trace3d.html?trace=${encodeURIComponent('../traces/' + t.traceFile)}`;
+    $list.appendChild(card);
+  }
+}
+setupRecent();
 </script>
 </body>
 </html>
