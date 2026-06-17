@@ -27,7 +27,6 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const fetch = (await import('node-fetch')).default;
             const [r1, r2] = await Promise.all([
               fetch('https://api.bar-rts.com/replays?limit=1&hasBots=false').then(r=>r.json()),
               fetch('https://bar-replay-demo.pages.dev/releases/index.json', {cache:'no-cache'}).then(r=>r.json()),
